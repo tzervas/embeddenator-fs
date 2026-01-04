@@ -6,22 +6,25 @@ authors = ["Tyler Zervas <tz-dev@vectorweight.com>"]
 description = "EmbrFS: FUSE-based holographic filesystem"
 license = "MIT"
 repository = "https://github.com/tzervas/embeddenator-fs"
-keywords = ["embeddenator", "vsa", "holographic", "sparse-ternary"]
-categories = ["algorithms", "data-structures", "memory-management"]
+keywords = ["embeddenator", "fuse", "filesystem", "holographic"]
+categories = ["filesystem", "os"]
 
 [features]
 default = []
-simd = []
-block-sparse = []
+fuse = ["fuser"]
 
 [dependencies]
-# Component dependencies will be minimal
-# Add specific deps as needed per component
+serde = { version = "1.0", features = ["derive"] }
+arc-swap = "1.8.0"
+rustc-hash = "2.1.1"
+fuser = { version = "0.16", optional = true }
+libc = "0.2"
+
+# TODO: Add component dependencies once git tags are set up
+# embeddenator-vsa = { git = "https://github.com/tzervas/embeddenator-vsa", tag = "v0.1.0" }
+# embeddenator-retrieval = { git = "https://github.com/tzervas/embeddenator-retrieval", tag = "v0.1.0" }
+# embeddenator-io = { git = "https://github.com/tzervas/embeddenator-io", tag = "v0.1.0" }
 
 [dev-dependencies]
 proptest = "1.0"
-criterion = "0.5"
-
-[[bench]]
-name = "component_bench"
-harness = false
+tempfile = "3.13"
