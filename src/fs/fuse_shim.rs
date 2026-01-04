@@ -69,12 +69,12 @@ use arc_swap::ArcSwap;
 use rustc_hash::FxHashMap;
 
 use crate::embrfs::Engram;
-use crate::vsa::ReversibleVSAConfig;
+use embeddenator_vsa::ReversibleVSAConfig;
 
-#[cfg(feature = "fuse")]
+
 use std::ffi::OsStr;
 
-#[cfg(feature = "fuse")]
+
 use std::path::Path;
 
 /// Inode number type (matches fuser's u64 inode convention)
@@ -145,7 +145,7 @@ impl Default for FileAttr {
     }
 }
 
-#[cfg(feature = "fuse")]
+
 impl From<FileAttr> for fuser::FileAttr {
     fn from(attr: FileAttr) -> Self {
         fuser::FileAttr {
@@ -179,7 +179,7 @@ pub enum FileKind {
     Symlink,
 }
 
-#[cfg(feature = "fuse")]
+
 impl From<FileKind> for fuser::FileType {
     fn from(kind: FileKind) -> Self {
         match kind {
@@ -723,7 +723,7 @@ impl EngramFS {
                     return Some(Vec::new());
                 }
                 let end = std::cmp::min(offset_usize.saturating_add(size as usize), max_len);
-                Some(self.read_backed_range(ino, backed, offset_usize, end))
+                Some(self.read_backed_range(ino, &backed, offset_usize, end))
             }
         }
     }
@@ -849,7 +849,7 @@ impl EngramFS {
 // FUSER FILESYSTEM TRAIT IMPLEMENTATION
 // =============================================================================
 
-#[cfg(feature = "fuse")]
+
 impl fuser::Filesystem for EngramFS {
     /// Initialize filesystem
     fn init(
@@ -1165,7 +1165,7 @@ fn slice_chunk_bounds(start: usize, end: usize, chunk_index: usize, chunk_size: 
 // =============================================================================
 
 /// Mount options for EngramFS
-#[cfg(feature = "fuse")]
+
 #[derive(Clone, Debug)]
 pub struct MountOptions {
     /// Read-only mount (default: true)
@@ -1178,7 +1178,7 @@ pub struct MountOptions {
     pub fsname: String,
 }
 
-#[cfg(feature = "fuse")]
+
 impl Default for MountOptions {
     fn default() -> Self {
         MountOptions {
@@ -1211,7 +1211,7 @@ impl Default for MountOptions {
 ///
 /// mount(fs, "/mnt/engram", MountOptions::default()).unwrap();
 /// ```
-#[cfg(feature = "fuse")]
+
 pub fn mount<P: AsRef<Path>>(
     fs: EngramFS,
     mountpoint: P,
@@ -1261,7 +1261,7 @@ pub fn mount<P: AsRef<Path>>(
 ///
 /// // When session is dropped, the filesystem will be unmounted
 /// ```
-#[cfg(feature = "fuse")]
+
 pub fn spawn_mount<P: AsRef<Path>>(
     fs: EngramFS,
     mountpoint: P,
@@ -1541,7 +1541,7 @@ mod tests {
     #[test]
     fn test_file_kind_conversion() {
         // Only run conversion tests when fuse feature is enabled
-        #[cfg(feature = "fuse")]
+        
         {
             let dir: fuser::FileType = FileKind::Directory.into();
             assert_eq!(dir, fuser::FileType::Directory);

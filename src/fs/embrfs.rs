@@ -20,12 +20,12 @@
 //! If encoding was perfect, correction is empty. If not, correction exactly
 //! compensates. Either way, reconstruction is guaranteed bit-perfect.
 
-use crate::vsa::{SparseVec, ReversibleVSAConfig, DIM};
-use crate::resonator::Resonator;
-use crate::correction::{CorrectionStore, CorrectionStats};
-use crate::retrieval::{RerankedResult, TernaryInvertedIndex};
-use crate::envelope::{BinaryWriteOptions, PayloadKind, unwrap_auto, wrap_or_legacy};
-use crate::metrics::metrics;
+use embeddenator_vsa::{SparseVec, ReversibleVSAConfig, DIM};
+use embeddenator_retrieval::resonator::Resonator;
+use embeddenator_retrieval::correction::{CorrectionStore, CorrectionStats};
+use embeddenator_retrieval::{RerankedResult, TernaryInvertedIndex};
+use embeddenator_io::envelope::{BinaryWriteOptions, PayloadKind, unwrap_auto, wrap_or_legacy};
+use embeddenator_obs::metrics;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
@@ -33,7 +33,7 @@ use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
 
-#[cfg(feature = "metrics")]
+
 use std::time::Instant;
 use walkdir::WalkDir;
 
@@ -446,7 +446,7 @@ pub fn query_hierarchical_codebook_with_store(
         return Vec::new();
     }
 
-    #[cfg(feature = "metrics")]
+    
     let start = Instant::now();
 
     let mut sub_cache: LruCache<SubEngram> = LruCache::new(bounds.max_open_engrams);
@@ -564,7 +564,7 @@ pub fn query_hierarchical_codebook_with_store(
     });
     out.truncate(bounds.k);
 
-    #[cfg(feature = "metrics")]
+    
     metrics().record_hier_query(start.elapsed());
 
     out
