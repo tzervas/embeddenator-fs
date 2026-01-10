@@ -211,28 +211,28 @@ pub struct CachedFile {
 pub struct EngramFS {
     /// Inode to file attributes mapping
     inodes: Arc<RwLock<HashMap<Ino, FileAttr>>>,
-    
+
     /// Inode to path mapping
     inode_paths: Arc<RwLock<HashMap<Ino, String>>>,
-    
+
     /// Path to inode mapping
     path_inodes: Arc<RwLock<HashMap<String, Ino>>>,
-    
+
     /// Directory contents (parent_ino -> entries)
     directories: Arc<RwLock<HashMap<Ino, Vec<DirEntry>>>>,
-    
+
     /// Cached file data (ino -> data)
     file_cache: Arc<RwLock<HashMap<Ino, CachedFile>>>,
-    
+
     /// Next available inode number
     next_ino: Arc<RwLock<Ino>>,
-    
+
     /// Read-only mode
     read_only: bool,
-    
+
     /// TTL for cached attributes
     attr_ttl: Duration,
-    
+
     /// TTL for cached entries
     entry_ttl: Duration,
 }
@@ -275,15 +275,29 @@ impl EngramFS {
 
         // SAFETY: init_root only called during construction, before any concurrent access
         // If locks are poisoned here, the filesystem is unrecoverable anyway
-        self.inodes.write().expect("Lock poisoned during init").insert(ROOT_INO, root_attr);
-        self.inode_paths.write().expect("Lock poisoned during init").insert(ROOT_INO, "/".to_string());
-        self.path_inodes.write().expect("Lock poisoned during init").insert("/".to_string(), ROOT_INO);
-        self.directories.write().expect("Lock poisoned during init").insert(ROOT_INO, Vec::new());
+        self.inodes
+            .write()
+            .expect("Lock poisoned during init")
+            .insert(ROOT_INO, root_attr);
+        self.inode_paths
+            .write()
+            .expect("Lock poisoned during init")
+            .insert(ROOT_INO, "/".to_string());
+        self.path_inodes
+            .write()
+            .expect("Lock poisoned during init")
+            .insert("/".to_string(), ROOT_INO);
+        self.directories
+            .write()
+            .expect("Lock poisoned during init")
+            .insert(ROOT_INO, Vec::new());
     }
 
     /// Allocate a new inode number
     fn alloc_ino(&self) -> Result<Ino, &'static str> {
-        let mut next = self.next_ino.write()
+        let mut next = self
+            .next_ino
+            .write()
             .map_err(|_| "Inode allocator lock poisoned")?;
         let ino = *next;
         *next += 1;
@@ -302,7 +316,7 @@ impl EngramFS {
     /// The assigned inode number for the new file
     pub fn add_file(&self, path: &str, data: Vec<u8>) -> Result<Ino, &'static str> {
         let path = normalize_path(path);
-        
+
         // Check if already exists
         let path_inodes = self.path_inodes.read().unwrap_or_else(|poisoned| {
             eprintln!("WARNING: path_inodes lock poisoned, recovering...");
@@ -320,11 +334,11 @@ impl EngramFS {
         // Create file
         let ino = self.alloc_ino()?;
         let size = data.len() as u64;
-        
+
         let attr = FileAttr {
             ino,
             size,
-            blocks: (size + 511) / 512,
+            blocks: size.div_ceil(512),
             kind: FileKind::RegularFile,
             perm: 0o644,
             nlink: 1,
@@ -332,22 +346,27 @@ impl EngramFS {
         };
 
         // Store file
-        self.inodes.write()
+        self.inodes
+            .write()
             .map_err(|_| "Inodes lock poisoned")?
             .insert(ino, attr.clone());
-        self.inode_paths.write()
+        self.inode_paths
+            .write()
             .map_err(|_| "Inode paths lock poisoned")?
             .insert(ino, path.clone());
-        self.path_inodes.write()
+        self.path_inodes
+            .write()
             .map_err(|_| "Path inodes lock poisoned")?
             .insert(path.clone(), ino);
-        self.file_cache.write()
+        self.file_cache
+            .write()
             .map_err(|_| "File cache lock poisoned")?
             .insert(ino, CachedFile { data, attr });
 
         // Add to parent directory
         let filename = filename(&path).ok_or("Invalid filename")?;
-        self.directories.write()
+        self.directories
+            .write()
             .map_err(|_| "Directories lock poisoned")?
             .get_mut(&parent_ino)
             .ok_or("Parent directory not found")?
@@ -363,7 +382,7 @@ impl EngramFS {
     /// Ensure a directory exists, creating it if necessary
     fn ensure_directory(&self, path: &str) -> Result<Ino, &'static str> {
         let path = normalize_path(path);
-        
+
         // Root always exists
         if path == "/" {
             return Ok(ROOT_INO);
@@ -395,22 +414,27 @@ impl EngramFS {
             ..Default::default()
         };
 
-        self.inodes.write()
+        self.inodes
+            .write()
             .map_err(|_| "Inodes lock poisoned")?
             .insert(ino, attr);
-        self.inode_paths.write()
+        self.inode_paths
+            .write()
             .map_err(|_| "Inode paths lock poisoned")?
             .insert(ino, path.clone());
-        self.path_inodes.write()
+        self.path_inodes
+            .write()
             .map_err(|_| "Path inodes lock poisoned")?
             .insert(path.clone(), ino);
-        self.directories.write()
+        self.directories
+            .write()
             .map_err(|_| "Directories lock poisoned")?
             .insert(ino, Vec::new());
 
         // Add to parent
         let dirname = filename(&path).ok_or("Invalid dirname")?;
-        self.directories.write()
+        self.directories
+            .write()
             .map_err(|_| "Directories lock poisoned")?
             .get_mut(&parent_ino)
             .ok_or("Parent not found")?
@@ -421,9 +445,12 @@ impl EngramFS {
             });
 
         // Update parent nlink
-        if let Some(parent_attr) = self.inodes.write()
+        if let Some(parent_attr) = self
+            .inodes
+            .write()
             .map_err(|_| "Inodes lock poisoned")?
-            .get_mut(&parent_ino) {
+            .get_mut(&parent_ino)
+        {
             parent_attr.nlink += 1;
         }
 
@@ -456,14 +483,14 @@ impl EngramFS {
             poisoned.into_inner()
         });
         let cached = cache.get(&ino)?;
-        
+
         let start = offset as usize;
         let end = std::cmp::min(start + size as usize, cached.data.len());
-        
+
         if start >= cached.data.len() {
             return Some(Vec::new());
         }
-        
+
         Some(cached.data[start..end].to_vec())
     }
 
@@ -491,14 +518,14 @@ impl EngramFS {
         if ino == ROOT_INO {
             return Some(ROOT_INO); // Root's parent is itself
         }
-        
+
         let paths = self.inode_paths.read().unwrap_or_else(|poisoned| {
             eprintln!("WARNING: inode_paths lock poisoned in get_parent, recovering...");
             poisoned.into_inner()
         });
         let path = paths.get(&ino)?;
         let parent = parent_path(path)?;
-        
+
         let path_inodes = self.path_inodes.read().unwrap_or_else(|poisoned| {
             eprintln!("WARNING: path_inodes lock poisoned in get_parent, recovering...");
             poisoned.into_inner()
@@ -521,9 +548,7 @@ impl EngramFS {
             eprintln!("WARNING: file_cache lock poisoned in total_size, recovering...");
             poisoned.into_inner()
         });
-        cache.values()
-            .map(|f| f.attr.size)
-            .sum()
+        cache.values().map(|f| f.attr.size).sum()
     }
 
     /// Check if filesystem is read-only
@@ -554,8 +579,11 @@ impl fuser::Filesystem for EngramFS {
         _req: &fuser::Request<'_>,
         _config: &mut fuser::KernelConfig,
     ) -> Result<(), libc::c_int> {
-        eprintln!("EngramFS initialized: {} files, {} bytes total",
-            self.file_count(), self.total_size());
+        eprintln!(
+            "EngramFS initialized: {} files, {} bytes total",
+            self.file_count(),
+            self.total_size()
+        );
         Ok(())
     }
 
@@ -637,13 +665,7 @@ impl fuser::Filesystem for EngramFS {
     }
 
     /// Open a file
-    fn open(
-        &mut self,
-        _req: &fuser::Request<'_>,
-        ino: u64,
-        flags: i32,
-        reply: fuser::ReplyOpen,
-    ) {
+    fn open(&mut self, _req: &fuser::Request<'_>, ino: u64, flags: i32, reply: fuser::ReplyOpen) {
         // Check if file exists
         if self.get_attr(ino).is_none() {
             reply.error(libc::ENOENT);
@@ -752,25 +774,19 @@ impl fuser::Filesystem for EngramFS {
         let total_blocks = (total_size + block_size - 1) / block_size;
 
         reply.statfs(
-            total_blocks,       // blocks - total data blocks
-            0,                  // bfree - free blocks (0 for read-only)
-            0,                  // bavail - available blocks (0 for read-only)
-            total_files,        // files - total file nodes
-            0,                  // ffree - free file nodes (0 for read-only)
-            block_size as u32,  // bsize - block size
-            255,                // namelen - maximum name length
-            block_size as u32,  // frsize - fragment size
+            total_blocks,      // blocks - total data blocks
+            0,                 // bfree - free blocks (0 for read-only)
+            0,                 // bavail - available blocks (0 for read-only)
+            total_files,       // files - total file nodes
+            0,                 // ffree - free file nodes (0 for read-only)
+            block_size as u32, // bsize - block size
+            255,               // namelen - maximum name length
+            block_size as u32, // frsize - fragment size
         );
     }
 
     /// Check file access permissions
-    fn access(
-        &mut self,
-        _req: &fuser::Request<'_>,
-        ino: u64,
-        mask: i32,
-        reply: fuser::ReplyEmpty,
-    ) {
+    fn access(&mut self, _req: &fuser::Request<'_>, ino: u64, mask: i32, reply: fuser::ReplyEmpty) {
         // Check if file exists
         if self.get_attr(ino).is_none() {
             reply.error(libc::ENOENT);
@@ -848,7 +864,7 @@ impl Default for MountOptions {
 /// # Example
 ///
 /// ```no_run
-/// use embeddenator::fuse_shim::{EngramFS, mount, MountOptions};
+/// use embeddenator_fs::fuse_shim::{EngramFS, mount, MountOptions};
 ///
 /// let fs = EngramFS::new(true);
 /// // ... populate fs with files ...
@@ -895,7 +911,7 @@ pub fn mount<P: AsRef<Path>>(
 /// # Example
 ///
 /// ```no_run
-/// use embeddenator::fuse_shim::{EngramFS, spawn_mount, MountOptions};
+/// use embeddenator_fs::fuse_shim::{EngramFS, spawn_mount, MountOptions};
 ///
 /// let fs = EngramFS::new(true);
 /// // ... populate fs with files ...
@@ -941,7 +957,7 @@ pub fn spawn_mount<P: AsRef<Path>>(
 /// # Example
 ///
 /// ```
-/// use embeddenator::fuse_shim::EngramFSBuilder;
+/// use embeddenator_fs::fuse_shim::EngramFSBuilder;
 ///
 /// let fs = EngramFSBuilder::new()
 ///     .add_file("/README.md", b"# Hello World".to_vec())
@@ -997,9 +1013,9 @@ fn normalize_path(path: &str) -> String {
     } else {
         format!("/{}", path)
     };
-    
+
     if path.len() > 1 && path.ends_with('/') {
-        path[..path.len()-1].to_string()
+        path[..path.len() - 1].to_string()
     } else {
         path
     }
@@ -1011,7 +1027,7 @@ fn parent_path(path: &str) -> Option<String> {
     if path == "/" {
         return None;
     }
-    
+
     match path.rfind('/') {
         Some(0) => Some("/".to_string()),
         Some(pos) => Some(path[..pos].to_string()),
@@ -1089,10 +1105,10 @@ mod tests {
     #[test]
     fn test_add_file() {
         let fs = EngramFS::new(true);
-        
+
         let ino = fs.add_file("/test.txt", b"hello world".to_vec()).unwrap();
         assert!(ino > ROOT_INO);
-        
+
         let data = fs.read_data(ino, 0, 100).unwrap();
         assert_eq!(data, b"hello world");
     }
@@ -1100,9 +1116,9 @@ mod tests {
     #[test]
     fn test_nested_directories() {
         let fs = EngramFS::new(true);
-        
+
         fs.add_file("/a/b/c/file.txt", b"deep".to_vec()).unwrap();
-        
+
         // All directories should exist
         assert!(fs.lookup_path("/a").is_some());
         assert!(fs.lookup_path("/a/b").is_some());
@@ -1113,14 +1129,14 @@ mod tests {
     #[test]
     fn test_readdir() {
         let fs = EngramFS::new(true);
-        
+
         fs.add_file("/foo.txt", b"foo".to_vec()).unwrap();
         fs.add_file("/bar.txt", b"bar".to_vec()).unwrap();
         fs.add_file("/subdir/baz.txt", b"baz".to_vec()).unwrap();
-        
+
         let root_entries = fs.read_dir(ROOT_INO).unwrap();
         assert_eq!(root_entries.len(), 3); // foo.txt, bar.txt, subdir
-        
+
         let names: Vec<_> = root_entries.iter().map(|e| e.name.as_str()).collect();
         assert!(names.contains(&"foo.txt"));
         assert!(names.contains(&"bar.txt"));
@@ -1131,13 +1147,13 @@ mod tests {
     fn test_read_partial() {
         let fs = EngramFS::new(true);
         let data = b"0123456789";
-        
+
         let ino = fs.add_file("/test.txt", data.to_vec()).unwrap();
-        
+
         // Read middle portion
         let partial = fs.read_data(ino, 3, 4).unwrap();
         assert_eq!(partial, b"3456");
-        
+
         // Read past end
         let past_end = fs.read_data(ino, 20, 10).unwrap();
         assert!(past_end.is_empty());
@@ -1149,20 +1165,20 @@ mod tests {
             .add_file("/a.txt", b"a".to_vec())
             .add_file("/b.txt", b"b".to_vec())
             .build();
-        
+
         assert_eq!(fs.file_count(), 2);
     }
 
     #[test]
     fn test_get_parent() {
         let fs = EngramFS::new(true);
-        
+
         fs.add_file("/a/b/c.txt", b"test".to_vec()).unwrap();
-        
+
         let c_ino = fs.lookup_path("/a/b/c.txt").unwrap();
         let b_ino = fs.lookup_path("/a/b").unwrap();
         let a_ino = fs.lookup_path("/a").unwrap();
-        
+
         assert_eq!(fs.get_parent(c_ino), Some(b_ino));
         assert_eq!(fs.get_parent(b_ino), Some(a_ino));
         assert_eq!(fs.get_parent(a_ino), Some(ROOT_INO));
@@ -1184,7 +1200,7 @@ mod tests {
         {
             let dir: fuser::FileType = FileKind::Directory.into();
             assert_eq!(dir, fuser::FileType::Directory);
-            
+
             let file: fuser::FileType = FileKind::RegularFile.into();
             assert_eq!(file, fuser::FileType::RegularFile);
         }
@@ -1194,35 +1210,35 @@ mod tests {
     fn test_lock_poisoning_recovery() {
         use std::sync::Arc;
         use std::thread;
-        
+
         // This test demonstrates that the filesystem can recover from poisoned locks
         // In the read path (read-only operations), we use unwrap_or_else with into_inner()
         // to continue serving requests even with poisoned locks
-        
+
         let fs = Arc::new(EngramFS::new(true));
-        
+
         // Add a file successfully
         fs.add_file("/test.txt", b"hello".to_vec()).unwrap();
         let ino = fs.lookup_path("/test.txt").unwrap();
-        
+
         // Simulate lock poisoning scenario by creating a poisoned lock in a thread
         // Note: We can't actually poison the lock in a real test without unsafe code,
         // but we can verify that our error handling works correctly
-        
+
         // Test that read operations continue to work
         let data = fs.read_data(ino, 0, 5);
         assert!(data.is_some());
         assert_eq!(data.unwrap(), b"hello");
-        
+
         // Test that lookup continues to work
         let found_ino = fs.lookup_path("/test.txt");
         assert_eq!(found_ino, Some(ino));
-        
+
         // Test that get_attr works
         let attr = fs.get_attr(ino);
         assert!(attr.is_some());
         assert_eq!(attr.unwrap().size, 5);
-        
+
         // Test concurrent access doesn't cause issues
         let fs_clone = Arc::clone(&fs);
         let handle = thread::spawn(move || {
@@ -1232,15 +1248,15 @@ mod tests {
                 let _ = fs_clone.lookup_path("/test.txt");
             }
         });
-        
+
         // Simultaneous reads from main thread
         for _ in 0..10 {
             let _ = fs.read_data(ino, 0, 5);
             let _ = fs.get_attr(ino);
         }
-        
+
         handle.join().unwrap();
-        
+
         // Verify filesystem is still functional
         assert_eq!(fs.file_count(), 1);
         assert_eq!(fs.total_size(), 5);
@@ -1250,11 +1266,11 @@ mod tests {
     fn test_write_lock_error_propagation() {
         // Test that write operations properly propagate lock errors
         let fs = EngramFS::new(false);
-        
+
         // This should succeed
         let result = fs.add_file("/test.txt", b"content".to_vec());
         assert!(result.is_ok());
-        
+
         // Verify the file was created
         assert!(fs.lookup_path("/test.txt").is_some());
         assert_eq!(fs.file_count(), 1);
