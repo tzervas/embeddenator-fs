@@ -20,10 +20,10 @@
 //! If encoding was perfect, correction is empty. If not, correction exactly
 //! compensates. Either way, reconstruction is guaranteed bit-perfect.
 
-use embeddenator_vsa::{SparseVec, ReversibleVSAConfig, DIM};
+use crate::correction::{CorrectionStats, CorrectionStore};
 use embeddenator_retrieval::resonator::Resonator;
-use crate::correction::{CorrectionStore, CorrectionStats};
 use embeddenator_retrieval::{RerankedResult, TernaryInvertedIndex};
+use embeddenator_vsa::{ReversibleVSAConfig, SparseVec, DIM};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
@@ -291,7 +291,8 @@ impl DirectorySubEngramStore {
     }
 
     fn path_for_id(&self, id: &str) -> PathBuf {
-        self.dir.join(format!("{}.subengram", escape_sub_engram_id(id)))
+        self.dir
+            .join(format!("{}.subengram", escape_sub_engram_id(id)))
     }
 }
 
@@ -321,9 +322,11 @@ pub fn save_hierarchical_manifest<P: AsRef<Path>>(
     let mut levels = hierarchical.levels.clone();
     levels.sort_by(|a, b| a.level.cmp(&b.level));
     for level in &mut levels {
-        level
-            .items
-            .sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.sub_engram_id.cmp(&b.sub_engram_id)));
+        level.items.sort_by(|a, b| {
+            a.path
+                .cmp(&b.path)
+                .then_with(|| a.sub_engram_id.cmp(&b.sub_engram_id))
+        });
     }
 
     let mut sub_engrams: BTreeMap<String, SubEngram> = BTreeMap::new();
@@ -361,7 +364,8 @@ pub fn save_sub_engrams_dir<P: AsRef<Path>>(
 
     for id in ids {
         // SAFETY: id comes from keys(), so get() must succeed
-        let sub = sub_engrams.get(id)
+        let sub = sub_engrams
+            .get(id)
             .expect("sub_engram id from keys() must exist in HashMap");
         let encoded = bincode::serialize(sub).map_err(io::Error::other)?;
         let path = dir.join(format!("{}.subengram", escape_sub_engram_id(id)));
@@ -432,7 +436,8 @@ pub fn query_hierarchical_codebook_with_store(
     let mut frontier: Vec<FrontierItem> = Vec::new();
     if let Some(level0) = hierarchical.levels.first() {
         for item in &level0.items {
-            let Some(sub) = get_cached_sub_engram(&mut sub_cache, store, &item.sub_engram_id) else {
+            let Some(sub) = get_cached_sub_engram(&mut sub_cache, store, &item.sub_engram_id)
+            else {
                 continue;
             };
             frontier.push(FrontierItem {
@@ -477,7 +482,8 @@ pub fn query_hierarchical_codebook_with_store(
                 .expect("index_cache.get() must succeed immediately after insert()")
         };
 
-        let mut local_hits = idx.query_top_k_reranked(query, codebook, bounds.candidate_k, bounds.k);
+        let mut local_hits =
+            idx.query_top_k_reranked(query, codebook, bounds.candidate_k, bounds.k);
         for hit in &mut local_hits {
             hit.sub_engram_id = node.sub_engram_id.clone();
         }
@@ -620,7 +626,7 @@ impl Engram {
 /// # Examples
 ///
 /// ```
-/// use embeddenator::EmbrFS;
+/// use embeddenator_fs::EmbrFS;
 /// use std::path::Path;
 ///
 /// let mut fs = EmbrFS::new();
@@ -646,7 +652,7 @@ impl EmbrFS {
     /// # Examples
     ///
     /// ```
-    /// use embeddenator::EmbrFS;
+    /// use embeddenator_fs::EmbrFS;
     ///
     /// let fs = EmbrFS::new();
     /// assert_eq!(fs.manifest.files.len(), 0);
@@ -702,7 +708,7 @@ impl EmbrFS {
     ///
     /// # Examples
     /// ```
-    /// use embeddenator::{EmbrFS, Resonator};
+    /// use embeddenator_fs::{EmbrFS, Resonator};
     ///
     /// let mut fs = EmbrFS::new();
     /// let resonator = Resonator::new();
@@ -720,7 +726,7 @@ impl EmbrFS {
     ///
     /// # Examples
     /// ```
-    /// use embeddenator::EmbrFS;
+    /// use embeddenator_fs::EmbrFS;
     ///
     /// let fs = EmbrFS::new();
     /// let stats = fs.correction_stats();
@@ -836,16 +842,18 @@ impl EmbrFS {
 
         for (i, chunk) in data.chunks(chunk_size).enumerate() {
             let chunk_id = self.manifest.total_chunks + i;
-            
+
             // Encode chunk to sparse vector
             let chunk_vec = SparseVec::encode_data(chunk, config, Some(&logical_path));
-            
+
             // Immediately verify: decode and compare
             let decoded = chunk_vec.decode_data(config, Some(&logical_path), chunk.len());
-            
+
             // Store correction if needed (guarantees reconstruction)
-            self.engram.corrections.add(chunk_id as u64, chunk, &decoded);
-            
+            self.engram
+                .corrections
+                .add(chunk_id as u64, chunk, &decoded);
+
             if chunk != decoded.as_slice() {
                 corrections_needed += 1;
             }
@@ -905,7 +913,7 @@ impl EmbrFS {
     ///
     /// # Examples
     /// ```no_run
-    /// use embeddenator::{EmbrFS, ReversibleVSAConfig};
+    /// use embeddenator_fs::{EmbrFS, ReversibleVSAConfig};
     /// use std::path::Path;
     ///
     /// let mut fs = EmbrFS::new();
@@ -925,12 +933,17 @@ impl EmbrFS {
         config: &ReversibleVSAConfig,
     ) -> io::Result<()> {
         let file_path = file_path.as_ref();
-        
+
         // Check if file already exists (not deleted)
-        if self.manifest.files.iter().any(|f| f.path == logical_path && !f.deleted) {
+        if self
+            .manifest
+            .files
+            .iter()
+            .any(|f| f.path == logical_path && !f.deleted)
+        {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
-                format!("File '{}' already exists in engram", logical_path)
+                format!("File '{}' already exists in engram", logical_path),
             ));
         }
 
@@ -967,7 +980,7 @@ impl EmbrFS {
     ///
     /// # Examples
     /// ```no_run
-    /// use embeddenator::{EmbrFS, ReversibleVSAConfig};
+    /// use embeddenator_fs::{EmbrFS, ReversibleVSAConfig};
     ///
     /// let mut fs = EmbrFS::new();
     /// let config = ReversibleVSAConfig::default();
@@ -976,18 +989,19 @@ impl EmbrFS {
     /// fs.remove_file("old_file.txt", true).unwrap();
     /// // File marked as deleted, won't be extracted
     /// ```
-    pub fn remove_file(
-        &mut self,
-        logical_path: &str,
-        verbose: bool,
-    ) -> io::Result<()> {
+    pub fn remove_file(&mut self, logical_path: &str, verbose: bool) -> io::Result<()> {
         // Find file in manifest
-        let file_entry = self.manifest.files.iter_mut()
+        let file_entry = self
+            .manifest
+            .files
+            .iter_mut()
             .find(|f| f.path == logical_path && !f.deleted)
-            .ok_or_else(|| io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("File '{}' not found in engram", logical_path)
-            ))?;
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::NotFound,
+                    format!("File '{}' not found in engram", logical_path),
+                )
+            })?;
 
         if verbose {
             println!(
@@ -1034,7 +1048,7 @@ impl EmbrFS {
     ///
     /// # Examples
     /// ```no_run
-    /// use embeddenator::{EmbrFS, ReversibleVSAConfig};
+    /// use embeddenator_fs::{EmbrFS, ReversibleVSAConfig};
     /// use std::path::Path;
     ///
     /// let mut fs = EmbrFS::new();
@@ -1097,7 +1111,7 @@ impl EmbrFS {
     ///
     /// # Examples
     /// ```no_run
-    /// use embeddenator::{EmbrFS, ReversibleVSAConfig};
+    /// use embeddenator_fs::{EmbrFS, ReversibleVSAConfig};
     ///
     /// let mut fs = EmbrFS::new();
     /// let config = ReversibleVSAConfig::default();
@@ -1109,11 +1123,7 @@ impl EmbrFS {
     /// // After many deletions, compact to reclaim space
     /// fs.compact(true, &config).unwrap();
     /// ```
-    pub fn compact(
-        &mut self,
-        verbose: bool,
-        config: &ReversibleVSAConfig,
-    ) -> io::Result<()> {
+    pub fn compact(&mut self, verbose: bool, config: &ReversibleVSAConfig) -> io::Result<()> {
         if verbose {
             let deleted_count = self.manifest.files.iter().filter(|f| f.deleted).count();
             let total_count = self.manifest.files.len();
@@ -1154,14 +1164,16 @@ impl EmbrFS {
                     } else {
                         DEFAULT_CHUNK_SIZE
                     };
-                    
+
                     let decoded = chunk_vec.decode_data(config, Some(&old_file.path), chunk_size);
-                    let chunk_data = if let Some(corrected) = self.engram.corrections.apply(chunk_id as u64, &decoded) {
+                    let chunk_data = if let Some(corrected) =
+                        self.engram.corrections.apply(chunk_id as u64, &decoded)
+                    {
                         corrected
                     } else {
                         decoded
                     };
-                    
+
                     file_data.extend_from_slice(&chunk_data);
                 }
             }
@@ -1172,11 +1184,13 @@ impl EmbrFS {
 
             for (i, chunk) in file_data.chunks(DEFAULT_CHUNK_SIZE).enumerate() {
                 let new_chunk_id = new_manifest.total_chunks + i;
-                
+
                 let chunk_vec = SparseVec::encode_data(chunk, config, Some(&old_file.path));
                 let decoded = chunk_vec.decode_data(config, Some(&old_file.path), chunk.len());
-                
-                new_engram.corrections.add(new_chunk_id as u64, chunk, &decoded);
+
+                new_engram
+                    .corrections
+                    .add(new_chunk_id as u64, chunk, &decoded);
 
                 new_engram.root = new_engram.root.bundle(&chunk_vec);
                 new_engram.codebook.insert(new_chunk_id, chunk_vec);
@@ -1313,21 +1327,23 @@ impl EmbrFS {
                     } else {
                         DEFAULT_CHUNK_SIZE
                     };
-                    
+
                     // Decode the sparse vector to bytes
                     // IMPORTANT: Use the same path as during encoding for correct shift calculation
                     // Also use the same chunk_size as during ingest for correct correction matching
                     let decoded = chunk_vec.decode_data(config, Some(&file_entry.path), chunk_size);
-                    
+
                     // Apply correction to guarantee bit-perfect reconstruction
-                    let chunk_data = if let Some(corrected) = engram.corrections.apply(chunk_id as u64, &decoded) {
+                    let chunk_data = if let Some(corrected) =
+                        engram.corrections.apply(chunk_id as u64, &decoded)
+                    {
                         corrected
                     } else {
                         // No correction found - use decoded directly
                         // This can happen with legacy engrams or if correction store is empty
                         decoded
                     };
-                    
+
                     reconstructed.extend_from_slice(&chunk_data);
                 }
             }
@@ -1384,7 +1400,7 @@ impl EmbrFS {
     ///
     /// # Examples
     /// ```
-    /// use embeddenator::{EmbrFS, Resonator, ReversibleVSAConfig};
+    /// use embeddenator_fs::{EmbrFS, Resonator, ReversibleVSAConfig};
     /// use std::path::Path;
     ///
     /// let mut fs = EmbrFS::new();
@@ -1407,7 +1423,9 @@ impl EmbrFS {
         }
 
         // SAFETY: we just checked is_none() above and returned early
-        let _resonator = self.resonator.as_ref()
+        let _resonator = self
+            .resonator
+            .as_ref()
             .expect("resonator is Some after is_none() check");
         let output_dir = output_dir.as_ref();
 
@@ -1447,14 +1465,16 @@ impl EmbrFS {
                 } else {
                     DEFAULT_CHUNK_SIZE
                 };
-                
+
                 let chunk_data = if let Some(vector) = self.engram.codebook.get(&chunk_id) {
                     // Decode the SparseVec back to bytes using reversible encoding
                     // IMPORTANT: Use the same path as during encoding for correct shift calculation
                     let decoded = vector.decode_data(config, Some(&file_entry.path), chunk_size);
-                    
+
                     // Apply correction to guarantee bit-perfect reconstruction
-                    if let Some(corrected) = self.engram.corrections.apply(chunk_id as u64, &decoded) {
+                    if let Some(corrected) =
+                        self.engram.corrections.apply(chunk_id as u64, &decoded)
+                    {
                         corrected
                     } else {
                         decoded
@@ -1464,13 +1484,16 @@ impl EmbrFS {
                     // Create a query vector from the chunk_id using reversible encoding
                     let query_vec = SparseVec::encode_data(&chunk_id.to_le_bytes(), config, None);
                     let recovered_vec = resonator.project(&query_vec);
-                    
+
                     // Decode the recovered vector back to bytes
                     // For resonator recovery, try with path first, fall back to no path
-                    let decoded = recovered_vec.decode_data(config, Some(&file_entry.path), chunk_size);
-                    
+                    let decoded =
+                        recovered_vec.decode_data(config, Some(&file_entry.path), chunk_size);
+
                     // Apply correction if available (may not be if chunk was lost)
-                    if let Some(corrected) = self.engram.corrections.apply(chunk_id as u64, &decoded) {
+                    if let Some(corrected) =
+                        self.engram.corrections.apply(chunk_id as u64, &decoded)
+                    {
                         corrected
                     } else {
                         // No correction available - best effort recovery
@@ -1478,14 +1501,14 @@ impl EmbrFS {
                     }
                 } else {
                     return Err(io::Error::new(
-                        io::ErrorKind::NotFound, 
-                        format!("Missing chunk {} and no resonator available", chunk_id)
+                        io::ErrorKind::NotFound,
+                        format!("Missing chunk {} and no resonator available", chunk_id),
                     ));
                 };
                 reconstructed.extend_from_slice(&chunk_data);
             }
 
-            reconstructed.truncate(file_entry.size as usize);
+            reconstructed.truncate(file_entry.size);
 
             fs::write(&file_path, reconstructed)?;
 
@@ -1524,7 +1547,7 @@ impl EmbrFS {
     ///
     /// # Examples
     /// ```
-    /// use embeddenator::{EmbrFS, ReversibleVSAConfig};
+    /// use embeddenator_fs::{EmbrFS, ReversibleVSAConfig};
     ///
     /// let fs = EmbrFS::new();
     /// let config = ReversibleVSAConfig::default();
@@ -1572,9 +1595,9 @@ impl EmbrFS {
                 }
                 level_prefixes
                     .entry(level)
-                    .or_insert_with(HashMap::new)
+                    .or_default()
                     .entry(prefix.clone())
-                    .or_insert_with(Vec::new)
+                    .or_default()
                     .push(file_entry);
             }
         }
@@ -1603,9 +1626,7 @@ impl EmbrFS {
                         .get(prefix)
                         // SAFETY: prefix comes from keys(), so get() must succeed
                         .expect("prefix key from keys() must exist in HashMap")
-                        .iter()
-                        .copied()
-                        .collect();
+                        .to_vec();
                     files.sort_by(|a, b| a.path.cmp(&b.path));
 
                     // Create permutation shift based on prefix hash
@@ -1636,7 +1657,8 @@ impl EmbrFS {
                     }
 
                     // Apply sparsity control
-                    if component_bundle.pos.len() + component_bundle.neg.len() > max_level_sparsity {
+                    if component_bundle.pos.len() + component_bundle.neg.len() > max_level_sparsity
+                    {
                         component_bundle = component_bundle.thin(max_level_sparsity);
                     }
 
@@ -1669,7 +1691,8 @@ impl EmbrFS {
                     if let Some(max_chunks) = max_chunks_per_node.filter(|v| *v > 0) {
                         if chunk_ids.len() > max_chunks {
                             let mut shard_ids: Vec<String> = Vec::new();
-                            for (shard_idx, chunk_slice) in chunk_ids.chunks(max_chunks).enumerate() {
+                            for (shard_idx, chunk_slice) in chunk_ids.chunks(max_chunks).enumerate()
+                            {
                                 let shard_id = format!("{}__shard_{:04}", sub_id, shard_idx);
                                 shard_ids.push(shard_id.clone());
                                 sub_engrams.insert(
@@ -1731,8 +1754,11 @@ impl EmbrFS {
                 }
             }
 
-            manifest_items
-                .sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.sub_engram_id.cmp(&b.sub_engram_id)));
+            manifest_items.sort_by(|a, b| {
+                a.path
+                    .cmp(&b.path)
+                    .then_with(|| a.sub_engram_id.cmp(&b.sub_engram_id))
+            });
 
             // Apply final sparsity control to level bundle
             if level_bundle.pos.len() + level_bundle.neg.len() > max_level_sparsity {
@@ -1780,7 +1806,7 @@ impl EmbrFS {
     ///
     /// # Examples
     /// ```
-    /// use embeddenator::{EmbrFS, ReversibleVSAConfig};
+    /// use embeddenator_fs::{EmbrFS, ReversibleVSAConfig};
     ///
     /// let fs = EmbrFS::new();
     /// let config = ReversibleVSAConfig::default();
@@ -1832,23 +1858,26 @@ impl EmbrFS {
                     } else {
                         DEFAULT_CHUNK_SIZE
                     };
-                    
+
                     // Decode using hierarchical inverse transformations
-                    let decoded = chunk_vector.decode_data(config, Some(&file_entry.path), chunk_size);
-                    
+                    let decoded =
+                        chunk_vector.decode_data(config, Some(&file_entry.path), chunk_size);
+
                     // Apply correction if available
-                    let chunk_data = if let Some(corrected) = self.engram.corrections.apply(chunk_id as u64, &decoded) {
+                    let chunk_data = if let Some(corrected) =
+                        self.engram.corrections.apply(chunk_id as u64, &decoded)
+                    {
                         corrected
                     } else {
                         decoded
                     };
-                    
+
                     reconstructed.extend_from_slice(&chunk_data);
                 }
             }
 
             // Truncate to actual file size
-            reconstructed.truncate(file_entry.size as usize);
+            reconstructed.truncate(file_entry.size);
 
             fs::write(&file_path, reconstructed)?;
 
