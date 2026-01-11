@@ -1,6 +1,6 @@
 [package]
 name = "embeddenator-fs"
-version = "0.20.0-alpha.1"
+version = "0.20.0-alpha.2"
 edition = "2021"
 authors = ["Tyler Zervas <tz-dev@vectorweight.com>"]
 description = "EmbrFS: FUSE filesystem backed by holographic engrams"
