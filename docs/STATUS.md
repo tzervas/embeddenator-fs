@@ -1,9 +1,11 @@
 # Project Status Summary
 
-**Project:** embeddenator-fs  
-**Version:** 0.20.0-alpha.2  
-**Status:** Alpha Release  
-**Date:** January 10, 2026
+**Project:** embeddenator-fs
+**Version:** 0.20.0-alpha.3
+**Status:** Alpha Release
+**Date:** January 14, 2026
+
+> **Note:** See [GAP_ANALYSIS.md](../GAP_ANALYSIS.md) for comprehensive gap analysis and [ROADMAP.md](../ROADMAP.md) for implementation plan.
 
 ## Overview
 
