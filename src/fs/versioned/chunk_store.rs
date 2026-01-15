@@ -311,7 +311,7 @@ mod tests {
     use crate::SparseVec;
 
     fn make_test_chunk(id: usize) -> VersionedChunk {
-        let vec = SparseVec::new(10000);
+        let vec = SparseVec::new();
         let hash = [(id & 0xFF) as u8; 8];
         VersionedChunk::new(vec, 4096, hash)
     }
@@ -394,11 +394,12 @@ mod tests {
     fn test_garbage_collection() {
         let codebook = VersionedChunkStore::new();
 
-        let mut chunk = make_test_chunk(1);
-        // Set ref_count to 0 manually for testing
-        *chunk.ref_count.get_mut() = 0;
+        let chunk = make_test_chunk(1);
+        codebook.insert(1, chunk.clone(), 0).unwrap();
 
-        codebook.insert(1, chunk, 0).unwrap();
+        // Decrement ref_count to 0
+        chunk.dec_ref();
+
         assert_eq!(codebook.len(), 1);
 
         // Run GC

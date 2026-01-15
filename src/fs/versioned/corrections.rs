@@ -3,7 +3,7 @@
 //! The correction store maintains the bit-perfect reconstruction corrections
 //! for VSA-encoded chunks with concurrent access support.
 
-use super::types::{ChunkId, VersionMismatch, VersionedResult};
+use super::types::{VersionMismatch, VersionedResult};
 use crate::fs::correction::ChunkCorrection;
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};

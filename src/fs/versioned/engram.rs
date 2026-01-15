@@ -111,7 +111,7 @@ impl VersionedEngram {
     /// Bundle a chunk into the root with automatic retry
     ///
     /// This handles the optimistic locking retry loop automatically.
-    pub fn bundle_chunk(&self, chunk_vec: &SparseVec) -> Result<u64, String> {
+    pub fn bundle_chunk(&self, _chunk_vec: &SparseVec) -> Result<u64, String> {
         const MAX_RETRIES: usize = 10;
 
         for attempt in 0..MAX_RETRIES {

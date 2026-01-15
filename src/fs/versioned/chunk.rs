@@ -4,7 +4,7 @@
 //! implements versioning for chunks to enable concurrent access with optimistic locking.
 
 use crate::SparseVec;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 
