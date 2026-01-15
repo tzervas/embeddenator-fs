@@ -20,6 +20,94 @@ This document outlines the plan to transform EmbrFS from an **immutable snapshot
 
 ---
 
+## Part 0: Critical Architecture Clarification
+
+### VSA Codebook vs Chunk Store vs Engram
+
+**IMPORTANT**: There are three distinct concepts that must not be confused:
+
+#### 1. VSA Codebook (in `embeddenator-vsa`)
+- **What it is**: The base vectors (dictionary/basis) used by VSA for encoding/decoding operations
+- **Location**: `embeddenator-vsa` crate, part of the VSA algorithm itself
+- **Mutability**: **STATIC** - typically fixed for a given VSA configuration
+- **Purpose**: Provides the mathematical foundation for transforming data ↔ sparse vectors
+- **Versioning**: Only changes when creating entirely new VSA configurations
+- **Analogy**: Like the alphabet in language - you don't change it for each sentence
+
+#### 2. Chunk Store (formerly called "codebook" in engram)
+- **What it is**: A `HashMap<ChunkId, SparseVec>` mapping file chunk IDs to their VSA-encoded representations
+- **Location**: `Engram` struct, `embrfs.rs:564`
+- **Mutability**: **MUTABLE** - this is what we're versioning!
+- **Purpose**: Stores the encoded chunks that make up files in the filesystem
+- **Versioning**: Gets versioned as `VersionedChunkStore` in the new architecture
+- **Analogy**: Like a dictionary of words (encoded from the alphabet) that make up your documents
+
+#### 3. Engram Root
+- **What it is**: A bundled/superposition `SparseVec` representing all chunks holographically
+- **Location**: `Engram` struct, `embrfs.rs:563`
+- **Mutability**: **IMMUTABLE per-operation** (bundle is pure), but replaced with new versions
+- **Purpose**: Enables holographic retrieval and queries across all encoded data
+- **Versioning**: Root version tracked via atomic counter with CAS updates
+- **Analogy**: Like a hologram of your entire document collection
+
+### Why This Distinction Matters
+
+The original codebase unfortunately named the chunk store "codebook", causing confusion:
+
+```rust
+// Current (confusing naming)
+pub struct Engram {
+    pub root: SparseVec,
+    pub codebook: HashMap<usize, SparseVec>,  // ← NOT the VSA codebook!
+    pub corrections: CorrectionStore,
+}
+```
+
+This led to initial misunderstanding that we'd be versioning the VSA codebook itself, which would be incorrect. The VSA codebook (base vectors) is in `embeddenator-vsa` and should remain static.
+
+**Corrected architecture**:
+- **VSA Codebook** (embeddenator-vsa) = Base vectors for encoding (STATIC)
+- **Chunk Store** (engram.codebook HashMap) = Encoded chunks (VERSIONED)
+- **Root** (engram.root) = Holographic bundle (VERSIONED with CAS)
+- **Manifest** = File metadata (VERSIONED)
+- **Corrections** = Bit-perfect adjustments (VERSIONED)
+
+### Transparent Compression Philosophy
+
+EmbrFS is **NOT**:
+- A traditional indexed filesystem with separate compression
+- A system where compression is an explicit, add-on feature
+
+EmbrFS **IS**:
+- A transparent compression encoding system
+- Compression inherent to the VSA representation itself
+- A holographic storage system where data is naturally dense
+
+The compression comes from:
+1. **VSA encoding**: Data → sparse vectors (inherently compressed)
+2. **Bundling**: Superposition allows multiple chunks in one vector
+3. **Correction layer**: Minimal overhead for bit-perfect reconstruction
+
+Future layers (signatures, encryption) will be built **on top** of this transparent compression, not as alternatives to it.
+
+### Data Flow
+
+```text
+File Data (bytes)
+    ↓
+ Chunking (4KB blocks)
+    ↓
+VSA Encoding (using static VSA codebook from embeddenator-vsa)
+    ↓
+Encoded Chunks (SparseVec) → stored in Chunk Store (VERSIONED)
+    ↓
+Bundle → Root Engram (SparseVec, VERSIONED with CAS)
+    ↓
+Correction Layer → Bit-perfect adjustments (VERSIONED)
+```
+
+---
+
 ## Part 1: Current State Analysis
 
 ### Current Architecture Limitations
@@ -93,16 +181,16 @@ Instead of full copies, share immutable data:
 
 ```rust
 // Codebook with Arc-wrapped chunks
-struct VersionedCodebook {
+struct VersionedChunkStore {
     chunks: Arc<HashMap<ChunkId, Arc<VersionedChunk>>>,
     version: u64,
 }
 
 // Updating a single chunk creates new map with shared entries
-fn update_chunk(&self, id: ChunkId, new_chunk: VersionedChunk) -> VersionedCodebook {
+fn update_chunk(&self, id: ChunkId, new_chunk: VersionedChunk) -> VersionedChunkStore {
     let mut new_chunks = (*self.chunks).clone(); // Shallow clone (Arc pointers)
     new_chunks.insert(id, Arc::new(new_chunk));
-    VersionedCodebook {
+    VersionedChunkStore {
         chunks: Arc::new(new_chunks),
         version: self.version + 1,
     }
@@ -135,7 +223,7 @@ impl Engram {
         let new_vec = SparseVec::encode_data(new_data, config)?;
 
         // 2. Update codebook (mutable HashMap)
-        self.codebook.insert(chunk_id, new_vec);
+        self.chunk_store.insert(chunk_id, new_vec);
 
         // 3. Update correction
         let decoded = new_vec.decode_data(config, None, new_data.len());
@@ -170,9 +258,9 @@ pub struct VersionedChunk {
 }
 ```
 
-#### VersionedCodebook
+#### VersionedChunkStore
 ```rust
-pub struct VersionedCodebook {
+pub struct VersionedChunkStore {
     chunks: Arc<RwLock<HashMap<ChunkId, Arc<VersionedChunk>>>>,
     global_version: AtomicU64,
     pending_writes: Arc<RwLock<Vec<PendingWrite>>>,
@@ -185,7 +273,7 @@ pub struct PendingWrite {
     timestamp: Instant,
 }
 
-impl VersionedCodebook {
+impl VersionedChunkStore {
     /// Read with optimistic locking - no blocking
     pub fn get(&self, chunk_id: ChunkId) -> Option<(Arc<VersionedChunk>, u64)> {
         let chunks = self.chunks.read().unwrap();
@@ -399,7 +487,7 @@ pub struct VersionedEngram {
     root_version: AtomicU64,
 
     // Versioned components
-    codebook: VersionedCodebook,
+    chunk_store: VersionedChunkStore,
     corrections: VersionedCorrectionStore,
     manifest: VersionedManifest,
 
@@ -447,7 +535,7 @@ impl VersionedEngram {
         // 2. Read chunks (non-blocking)
         let mut file_data = Vec::with_capacity(file_entry.size);
         for &chunk_id in &file_entry.chunks {
-            let (chunk, _) = self.codebook.get(chunk_id).ok_or(ChunkNotFound)?;
+            let (chunk, _) = self.chunk_store.get(chunk_id).ok_or(ChunkNotFound)?;
             let (correction, _) = self.corrections.get(chunk_id as u64)?;
 
             // Decode chunk
@@ -509,7 +597,7 @@ impl VersionedEngram {
         let mut chunk_ids = Vec::new();
 
         // 3. Get current codebook version
-        let codebook_version = self.codebook.global_version.load(Ordering::Acquire);
+        let codebook_version = self.chunk_store.global_version.load(Ordering::Acquire);
 
         // 4. Encode chunks and update codebook
         let mut chunk_updates = Vec::new();
@@ -542,7 +630,7 @@ impl VersionedEngram {
         }
 
         // 5. Batch update codebook
-        self.codebook.batch_update(chunk_updates, codebook_version)?;
+        self.chunk_store.batch_update(chunk_updates, codebook_version)?;
 
         // 6. Update manifest
         let new_entry = VersionedFileEntry {
@@ -583,7 +671,7 @@ impl VersionedEngram {
             // Build new root
             let mut new_root = (*current_root).clone();
             for &chunk_id in chunk_ids {
-                if let Some((chunk, _)) = self.codebook.get(chunk_id) {
+                if let Some((chunk, _)) = self.chunk_store.get(chunk_id) {
                     new_root = new_root.bundle(&chunk.vector);
                 }
             }
@@ -684,7 +772,7 @@ impl VersionedEngram {
         };
 
         // 3. Update codebook (with version check)
-        let new_version = self.codebook.update(chunk_id, new_chunk, expected_version)?;
+        let new_version = self.chunk_store.update(chunk_id, new_chunk, expected_version)?;
 
         // 4. Update correction
         self.corrections.update(
@@ -775,7 +863,7 @@ impl VersionedEngram {
         let mut data = Vec::new();
         for i in start_chunk..(start_chunk + num_chunks) {
             let chunk_id = file_entry.chunks[i];
-            let (chunk, _) = self.codebook.get(chunk_id).ok_or(ChunkNotFound)?;
+            let (chunk, _) = self.chunk_store.get(chunk_id).ok_or(ChunkNotFound)?;
             let (correction, _) = self.corrections.get(chunk_id as u64)?;
 
             let decoded = chunk.vector.decode_data(&self.config, None, 4096);
@@ -984,7 +1072,7 @@ fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
 
 **Tasks:**
 1. Create `VersionedChunk` struct
-2. Create `VersionedCodebook` with optimistic locking
+2. Create `VersionedChunkStore` with optimistic locking
 3. Create `VersionedCorrectionStore` with optimistic locking
 4. Create `VersionedManifest` with per-file versioning
 5. Create `VersionedEngram` top-level wrapper
@@ -993,7 +1081,7 @@ fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
 **Deliverables:**
 - `src/fs/versioned/mod.rs` - Module structure
 - `src/fs/versioned/chunk.rs` - VersionedChunk
-- `src/fs/versioned/codebook.rs` - VersionedCodebook
+- `src/fs/versioned/codebook.rs` - VersionedChunkStore
 - `src/fs/versioned/corrections.rs` - VersionedCorrectionStore
 - `src/fs/versioned/manifest.rs` - VersionedManifest
 - `src/fs/versioned/engram.rs` - VersionedEngram
@@ -1262,7 +1350,7 @@ fn getattr(&mut self, _req: &Request, ino: u64, reply: ReplyAttr) {
 - [ ] Reviewed and approved plan
 - [ ] Created `src/fs/versioned/` module structure
 - [ ] Implemented `VersionedChunk`
-- [ ] Implemented `VersionedCodebook` (partial)
+- [ ] Implemented `VersionedChunkStore` (partial)
 - [ ] Written unit tests
 - [ ] Updated documentation outline
 
