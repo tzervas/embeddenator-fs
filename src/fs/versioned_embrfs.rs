@@ -311,8 +311,13 @@ impl VersionedEmbrFS {
         }
 
         // 5. Batch insert chunks into store
-        self.chunk_store
-            .batch_insert(chunk_updates, store_version)?;
+        if expected_version.is_none() {
+            // New file - use lock-free insert (chunk IDs are unique)
+            self.chunk_store.batch_insert_new(chunk_updates)?;
+        } else {
+            // Existing file - use versioned update with optimistic locking
+            self.chunk_store.batch_insert(chunk_updates, store_version)?;
+        }
 
         // 6. Add corrections (after chunk store update)
         let mut corrections_version = self.corrections.current_version();
