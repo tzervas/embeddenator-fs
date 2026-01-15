@@ -3,7 +3,7 @@
 //! This module provides the main VersionedEngram struct that coordinates
 //! all versioned components and provides high-level read/write operations.
 
-use super::codebook::VersionedCodebook;
+use super::chunk_store::VersionedChunkStore;
 use super::corrections::VersionedCorrectionStore;
 use super::manifest::VersionedManifest;
 use super::transaction::{Transaction, TransactionManager, TransactionStatus};
@@ -23,8 +23,8 @@ pub struct VersionedEngram {
     /// Version of the root vector
     root_version: Arc<AtomicU64>,
 
-    /// Versioned codebook
-    pub codebook: VersionedCodebook,
+    /// Versioned chunk store (NOT the VSA codebook - that's in embeddenator-vsa)
+    pub chunk_store: VersionedChunkStore,
 
     /// Versioned corrections
     pub corrections: VersionedCorrectionStore,
@@ -54,7 +54,7 @@ impl VersionedEngram {
         Self {
             root: Arc::new(RwLock::new(root)),
             root_version: Arc::new(AtomicU64::new(0)),
-            codebook: VersionedCodebook::new(),
+            chunk_store: VersionedChunkStore::new(),
             corrections: VersionedCorrectionStore::new(),
             manifest: VersionedManifest::new(),
             tx_manager: TransactionManager::new(),
@@ -206,7 +206,7 @@ impl VersionedEngram {
         EngramStats {
             global_version: self.version(),
             root_version: self.root_version(),
-            codebook: self.codebook.stats(),
+            chunk_store: self.chunk_store.stats(),
             corrections: self.corrections.stats(),
             manifest: self.manifest.stats(),
             transactions: self.transaction_stats(),
@@ -225,7 +225,7 @@ impl Clone for VersionedEngram {
         Self {
             root: Arc::clone(&self.root),
             root_version: Arc::clone(&self.root_version),
-            codebook: self.codebook.clone(),
+            chunk_store: self.chunk_store.clone(),
             corrections: self.corrections.clone(),
             manifest: self.manifest.clone(),
             tx_manager: TransactionManager::new(), // New manager for clone
@@ -249,7 +249,7 @@ pub struct TransactionStats {
 pub struct EngramStats {
     pub global_version: u64,
     pub root_version: u64,
-    pub codebook: super::codebook::CodebookStats,
+    pub chunk_store: super::chunk_store::CodebookStats,
     pub corrections: super::corrections::CorrectionStats,
     pub manifest: super::manifest::ManifestStats,
     pub transactions: TransactionStats,

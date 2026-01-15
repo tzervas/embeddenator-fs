@@ -1,6 +1,9 @@
-//! Versioned codebook with optimistic locking
+//! Versioned chunk store with optimistic locking
 //!
-//! The codebook is a HashMap that stores chunk ID → VersionedChunk mappings.
+//! The chunk store is a HashMap that stores chunk ID → VersionedChunk mappings.
+//! This is NOT the VSA codebook (base vectors) - that's in embeddenator-vsa.
+//! This stores the encoded chunks that make up files in the engram.
+//!
 //! It supports concurrent reads and writes with optimistic locking for conflict detection.
 
 use super::chunk::VersionedChunk;
@@ -9,11 +12,15 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 
-/// A versioned codebook with optimistic locking
+/// A versioned chunk store with optimistic locking
 ///
-/// The codebook stores mappings from chunk IDs to versioned chunks. Multiple readers
-/// can access the codebook concurrently without blocking. Writers check the global
+/// The chunk store maintains mappings from chunk IDs to versioned chunks. Multiple readers
+/// can access the store concurrently without blocking. Writers check the global
 /// version before committing changes to detect conflicts.
+///
+/// Note: This is distinct from the VSA codebook (base vectors used for encoding).
+/// The VSA codebook is in embeddenator-vsa and is typically static.
+/// This chunk store maps file chunk IDs to their VSA-encoded representations.
 ///
 /// ## Concurrency Model
 ///
@@ -26,11 +33,11 @@ use std::sync::{Arc, RwLock};
 ///                                        ↓
 ///                                   If changed → VersionMismatch
 /// ```
-pub struct VersionedCodebook {
+pub struct VersionedChunkStore {
     /// Map of chunk ID to versioned chunk (protected by RwLock)
     chunks: Arc<RwLock<HashMap<ChunkId, Arc<VersionedChunk>>>>,
 
-    /// Global version number for the entire codebook
+    /// Global version number for the entire chunk store
     /// Incremented on every write operation
     global_version: Arc<AtomicU64>,
 
@@ -39,7 +46,7 @@ pub struct VersionedCodebook {
     hash_index: Arc<RwLock<HashMap<[u8; 8], ChunkId>>>,
 }
 
-impl VersionedCodebook {
+impl VersionedChunkStore {
     /// Create a new empty versioned codebook
     pub fn new() -> Self {
         Self {
@@ -271,13 +278,13 @@ impl VersionedCodebook {
     }
 }
 
-impl Default for VersionedCodebook {
+impl Default for VersionedChunkStore {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Clone for VersionedCodebook {
+impl Clone for VersionedChunkStore {
     fn clone(&self) -> Self {
         Self {
             chunks: Arc::clone(&self.chunks),
@@ -311,14 +318,14 @@ mod tests {
 
     #[test]
     fn test_codebook_creation() {
-        let codebook = VersionedCodebook::new();
+        let codebook = VersionedChunkStore::new();
         assert_eq!(codebook.version(), 0);
         assert!(codebook.is_empty());
     }
 
     #[test]
     fn test_insert_and_get() {
-        let codebook = VersionedCodebook::new();
+        let codebook = VersionedChunkStore::new();
         let chunk = make_test_chunk(1);
 
         let version = codebook.insert(1, chunk, 0).unwrap();
@@ -331,7 +338,7 @@ mod tests {
 
     #[test]
     fn test_version_mismatch() {
-        let codebook = VersionedCodebook::new();
+        let codebook = VersionedChunkStore::new();
         let chunk1 = make_test_chunk(1);
         let chunk2 = make_test_chunk(2);
 
@@ -353,7 +360,7 @@ mod tests {
 
     #[test]
     fn test_batch_insert() {
-        let codebook = VersionedCodebook::new();
+        let codebook = VersionedChunkStore::new();
 
         let updates = vec![
             (1, make_test_chunk(1)),
@@ -368,7 +375,7 @@ mod tests {
 
     #[test]
     fn test_deduplication() {
-        let codebook = VersionedCodebook::new();
+        let codebook = VersionedChunkStore::new();
 
         let chunk1 = make_test_chunk(1);
         let hash = chunk1.content_hash;
@@ -385,7 +392,7 @@ mod tests {
 
     #[test]
     fn test_garbage_collection() {
-        let codebook = VersionedCodebook::new();
+        let codebook = VersionedChunkStore::new();
 
         let mut chunk = make_test_chunk(1);
         // Set ref_count to 0 manually for testing
@@ -402,7 +409,7 @@ mod tests {
 
     #[test]
     fn test_stats() {
-        let codebook = VersionedCodebook::new();
+        let codebook = VersionedChunkStore::new();
 
         for i in 0..10 {
             codebook.insert(i, make_test_chunk(i), i as u64).unwrap();

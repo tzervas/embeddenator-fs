@@ -24,9 +24,23 @@ walkdir = "2.3"
 arc-swap = "1.6"
 rustc-hash = "2.0"
 sha2 = "0.10"
-# Phase 2A crates.io dependencies
+# Core embeddenator dependencies
+# For development: use git dependencies for finer-grained control
+# For release: uncomment crates.io versions and comment out git versions
+
+# Development (git dependencies) - Currently disabled due to version conflicts with retrieval
+# Uncomment when all repos are updated to use git deps
+# embeddenator-vsa = { git = "https://github.com/tzervas/embeddenator-vsa", branch = "main" }
+# embeddenator-retrieval = { git = "https://github.com/tzervas/embeddenator-retrieval", branch = "main" }
+# embeddenator-io = { git = "https://github.com/tzervas/embeddenator-io", branch = "main" }  # If needed
+
+# Release (crates.io dependencies)
 embeddenator-vsa = { version = "0.20.0-alpha.1" }
 embeddenator-retrieval = { version = "0.20.0-alpha.1" }
+# embeddenator-io = { version = "0.20.0-alpha.1" }  # If needed
+
+# Note: To use git dependencies in development, use [patch.crates-io] section or ensure
+# all dependencies transitively use the same git sources
 
 [dev-dependencies]
 proptest = "1.0"

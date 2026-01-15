@@ -16,13 +16,15 @@
 //!                          ↓
 //!          ┌───────────────┴───────────────┬─────────────────┐
 //!          ↓                               ↓                 ↓
-//! ┌──────────────────┐        ┌──────────────────┐  ┌──────────────────┐
-//! │ VersionedCodebook│        │VersionedManifest │  │VersionedCorr...  │
-//! │ - Chunk-level    │        │ - File-level     │  │ - Chunk-level    │
-//! │   versioning     │        │   versioning     │  │   versioning     │
-//! │ - RwLock         │        │ - RwLock         │  │ - RwLock         │
-//! │ - Arc<SparseVec> │        │ - Per-file ver.  │  │ - Arc<Corr>      │
-//! └──────────────────┘        └──────────────────┘  └──────────────────┘
+//! ┌───────────────────┐       ┌──────────────────┐  ┌──────────────────┐
+//! │VersionedChunk     │       │VersionedManifest │  │VersionedCorr...  │
+//! │       Store       │       │ - File-level     │  │ - Chunk-level    │
+//! │ - Chunk-level     │       │   versioning     │  │   versioning     │
+//! │   versioning      │       │ - RwLock         │  │ - RwLock         │
+//! │ - RwLock          │       │ - Per-file ver.  │  │ - Arc<Corr>      │
+//! │ - Arc<SparseVec>  │       │                  │  │                  │
+//! │ (NOT VSA codebook)│       │                  │  │                  │
+//! └───────────────────┘       └──────────────────┘  └──────────────────┘
 //! ```
 //!
 //! ## Key Concepts
@@ -36,9 +38,20 @@
 //! 3. **Write Phase**: Writer checks if version unchanged, updates if valid
 //! 4. **Retry**: If version mismatch, retry from step 1
 //!
+//! ### VSA Codebook vs Chunk Store
+//!
+//! **Important distinction:**
+//! - **VSA Codebook** (in embeddenator-vsa): Static base vectors used for encoding/decoding.
+//!   This is the "dictionary" or "basis" that the VSA uses. Typically not versioned.
+//! - **Chunk Store** (this module): Maps file chunk IDs to their VSA-encoded representations.
+//!   This is what gets versioned for mutable engrams.
+//!
+//! The engram's transparent compression comes from the VSA encoding itself, not from
+//! explicit compression as a separate layer. Future layers (signatures, encryption) build on top.
+//!
 //! ### Multi-Level Versioning
 //!
-//! - **Component-Level**: Codebook, Manifest, Corrections each have global version
+//! - **Component-Level**: Chunk Store, Manifest, Corrections each have global version
 //! - **Entry-Level**: Individual chunks/files have local versions
 //! - **Engram-Level**: Overall engram version coordinates components
 //!
@@ -89,7 +102,7 @@
 //! ```
 
 pub mod chunk;
-pub mod codebook;
+pub mod chunk_store;
 pub mod corrections;
 pub mod engram;
 pub mod manifest;
@@ -97,7 +110,7 @@ pub mod transaction;
 pub mod types;
 
 pub use chunk::VersionedChunk;
-pub use codebook::VersionedCodebook;
+pub use chunk_store::VersionedChunkStore;
 pub use corrections::VersionedCorrectionStore;
 pub use engram::VersionedEngram;
 pub use manifest::{VersionedFileEntry, VersionedManifest};
