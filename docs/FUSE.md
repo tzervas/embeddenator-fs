@@ -33,7 +33,7 @@ EmbrFS provides optional FUSE (Filesystem in Userspace) support for mounting hol
 **Enable Feature Flag:**
 ```toml
 [dependencies]
-embeddenator-fs = { version = "0.20.0-alpha.1", features = ["fuse"] }
+embeddenator-fs = { version = "0.20.0-alpha.3", features = ["fuse"] }
 ```
 
 ### Basic Mounting

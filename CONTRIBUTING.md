@@ -38,7 +38,7 @@ What actually happened.
 **Environment:**
 - OS: [e.g., Ubuntu 24.04]
 - Rust version: [e.g., 1.75.0]
-- embeddenator-fs version: [e.g., 0.20.0-alpha.1]
+- embeddenator-fs version: [e.g., 0.20.0-alpha.3]
 - Features enabled: [e.g., fuse]
 
 **Additional Context:**

@@ -1,7 +1,7 @@
 # embeddenator-fs Gap Analysis & Implementation Plan
 
 **Date**: 2026-01-14
-**Version**: v0.20.0-alpha.1
+**Version**: v0.20.0-alpha.3
 **Status**: Phase 2A - Component Extraction
 
 ## Executive Summary
@@ -196,7 +196,7 @@ For large datasets:
 
 ### 5. Phase 2A Completion
 - ✅ Extract to separate repo
-- ✅ Publish v0.20.0-alpha.1
+- ✅ Publish v0.20.0-alpha.3
 - ⚠️ Need: CLI
 - ⚠️ Need: Integration tests
 - ⚠️ Need: Documentation

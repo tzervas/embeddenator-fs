@@ -304,4 +304,4 @@ See [ROADMAP.md](ROADMAP.md) for planned features and timeline.
 
 ---
 
-**Note**: This quick start describes the **intended** user experience after gap closure. Most CLI features shown here do not yet exist. Current version (v0.20.0-alpha.1) is library-only. See [GAP_ANALYSIS.md](GAP_ANALYSIS.md) for implementation status.
+**Note**: This quick start describes the **intended** user experience after gap closure. Most CLI features shown here do not yet exist. Current version (v0.20.0-alpha.3) is library-only. See [GAP_ANALYSIS.md](GAP_ANALYSIS.md) for implementation status.

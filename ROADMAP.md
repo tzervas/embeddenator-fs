@@ -1,6 +1,6 @@
 # embeddenator-fs Roadmap
 
-**Current Version**: v0.20.0-alpha.1
+**Current Version**: v0.20.0-alpha.3
 **Target Version**: v1.0.0
 **Estimated Timeline**: 6-8 weeks
 

@@ -95,10 +95,10 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-embedenator-fs = "0.20.0-alpha.2"
+embeddenator-fs = "0.20.0-alpha.3"
 
 # Enable FUSE mounting support (Linux only)
-embedenator-fs = { version = "0.20.0-alpha.2", features = ["fuse"] }
+embeddenator-fs = { version = "0.20.0-alpha.3", features = ["fuse"] }
 ```
 
 ## Usage
