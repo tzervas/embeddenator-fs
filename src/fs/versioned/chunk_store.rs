@@ -146,6 +146,31 @@ impl VersionedChunkStore {
         Ok(new_version)
     }
 
+    /// Batch insert NEW chunks without version checking
+    ///
+    /// This is used for inserting brand new chunks (e.g., when creating a new file)
+    /// where chunk IDs are guaranteed unique and monotonically increasing, so
+    /// concurrent inserts cannot conflict.
+    ///
+    /// This enables lock-free concurrent file creation.
+    pub fn batch_insert_new(
+        &self,
+        updates: Vec<(ChunkId, VersionedChunk)>,
+    ) -> VersionedResult<u64> {
+        let mut chunks = self.chunks.write().unwrap();
+        let mut hash_index = self.hash_index.write().unwrap();
+
+        // No version check - chunk IDs are unique
+        for (chunk_id, chunk) in updates {
+            hash_index.insert(chunk.content_hash, chunk_id);
+            chunks.insert(chunk_id, Arc::new(chunk));
+        }
+
+        // Increment version once for the entire batch
+        let new_version = self.global_version.fetch_add(1, Ordering::AcqRel) + 1;
+        Ok(new_version)
+    }
+
     /// Remove a chunk by ID
     ///
     /// Returns the removed chunk on success, or VersionMismatch if the version changed.

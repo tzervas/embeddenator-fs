@@ -45,3 +45,8 @@ embeddenator-retrieval = { version = "0.20.0-alpha.1" }
 [dev-dependencies]
 proptest = "1.0"
 tempfile = "3.8"
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "filesystem_benchmarks"
+harness = false

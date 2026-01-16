@@ -149,6 +149,29 @@ impl VersionedCorrectionStore {
         Ok(new_version)
     }
 
+    /// Batch insert NEW corrections without version checking
+    ///
+    /// This is used for inserting brand new corrections (e.g., when creating a new file)
+    /// where chunk IDs are guaranteed unique and monotonically increasing, so
+    /// concurrent inserts cannot conflict.
+    pub fn batch_insert_new(
+        &self,
+        updates: Vec<(u64, ChunkCorrection)>,
+    ) -> VersionedResult<u64> {
+        let mut corrections = self.corrections.write().unwrap();
+        let mut stats = self.stats.write().unwrap();
+
+        // No version check - chunk IDs are unique
+        for (chunk_id, correction) in updates {
+            corrections.insert(chunk_id, Arc::new(correction));
+            stats.total_chunks += 1;
+        }
+
+        // Increment version
+        let new_version = self.version.fetch_add(1, Ordering::AcqRel) + 1;
+        Ok(new_version)
+    }
+
     /// Remove a correction
     pub fn remove(
         &self,

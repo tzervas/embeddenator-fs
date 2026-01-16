@@ -305,20 +305,28 @@ impl VersionedEmbrFS {
 
             // Prepare correction
             let correction = crate::correction::ChunkCorrection::new(chunk_id as u64, chunk_data, &decoded);
-            corrections_to_add.push((chunk_id, correction));
+            corrections_to_add.push((chunk_id as u64, correction));
 
             chunk_ids.push(chunk_id);
         }
 
         // 5. Batch insert chunks into store
-        self.chunk_store
-            .batch_insert(chunk_updates, store_version)?;
+        if expected_version.is_none() {
+            // New file - use lock-free insert (chunk IDs are unique)
+            self.chunk_store.batch_insert_new(chunk_updates)?;
+        } else {
+            // Existing file - use versioned update with optimistic locking
+            self.chunk_store.batch_insert(chunk_updates, store_version)?;
+        }
 
         // 6. Add corrections (after chunk store update)
-        let mut corrections_version = self.corrections.current_version();
-        for (chunk_id, correction) in corrections_to_add {
-            corrections_version = self.corrections
-                .update(chunk_id as u64, correction, corrections_version)?;
+        if expected_version.is_none() {
+            // New file - use lock-free insert (chunk IDs are unique)
+            self.corrections.batch_insert_new(corrections_to_add)?;
+        } else {
+            // Existing file - use versioned batch update
+            let corrections_version = self.corrections.current_version();
+            self.corrections.batch_update(corrections_to_add, corrections_version)?;
         }
 
         // 6. Update manifest
