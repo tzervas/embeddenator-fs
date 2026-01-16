@@ -188,8 +188,17 @@ impl VersionedManifest {
         // Update chunk count
         let old_chunks = current_entry.chunks.len() as u64;
         let new_chunks = new_entry.chunks.len() as u64;
-        self.total_chunks
-            .fetch_add(new_chunks.wrapping_sub(old_chunks), Ordering::AcqRel);
+        if new_chunks >= old_chunks {
+            let delta = new_chunks - old_chunks;
+            if delta > 0 {
+                self.total_chunks.fetch_add(delta, Ordering::AcqRel);
+            }
+        } else {
+            let delta = old_chunks - new_chunks;
+            if delta > 0 {
+                self.total_chunks.fetch_sub(delta, Ordering::AcqRel);
+            }
+        }
 
         // Update file entry
         files[idx] = new_entry;
