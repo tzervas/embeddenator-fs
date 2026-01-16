@@ -44,6 +44,12 @@ pub struct VersionedEngram {
 
 impl VersionedEngram {
     /// Create a new versioned engram with default dimensionality
+    ///
+    /// # Arguments
+    /// * `dimensionality` - Reserved for future use. The actual dimensionality is
+    ///   determined by `SparseVec::new()` which uses the system's configured default.
+    ///   This parameter is preserved in the API for future VSA codebook integration
+    ///   when the dimensionality becomes configurable.
     pub fn new(_dimensionality: usize) -> Self {
         // SparseVec::new() doesn't take dimensionality parameter
         Self::with_root(Arc::new(SparseVec::new()))
@@ -110,8 +116,23 @@ impl VersionedEngram {
 
     /// Bundle a chunk into the root with automatic retry
     ///
-    /// This handles the optimistic locking retry loop automatically.
-    pub fn bundle_chunk(&self, _chunk_vec: &SparseVec) -> Result<u64, String> {
+    /// This operation superimposes a new chunk vector into the root using the
+    /// VSA bundle operation (XOR for binary vectors). The bundling is performed
+    /// with optimistic locking and automatic retry on version conflicts.
+    ///
+    /// # Algorithm
+    /// 1. Read current root and its version
+    /// 2. Create new root by bundling: `new_root = current_root ⊕ chunk_vec`
+    /// 3. Attempt CAS update with optimistic locking
+    /// 4. Retry with exponential backoff if version conflict detected
+    ///
+    /// # Arguments
+    /// * `chunk_vec` - The chunk vector to bundle into the root
+    ///
+    /// # Returns
+    /// * `Ok(new_version)` - The new root version after successful bundle
+    /// * `Err(e)` - Error after max retries exceeded or other failure
+    pub fn bundle_chunk(&self, chunk_vec: &SparseVec) -> Result<u64, String> {
         const MAX_RETRIES: usize = 10;
 
         for attempt in 0..MAX_RETRIES {
@@ -119,10 +140,9 @@ impl VersionedEngram {
             let current_root = self.root();
             let current_version = self.root_version();
 
-            // Create new root (bundle operation)
-            // Note: We'll need to implement bundle() for SparseVec or use a different method
-            // For now, just clone the root (placeholder)
-            let new_root = Arc::clone(&current_root);
+            // Create new root by bundling the chunk with current root
+            // Bundle operation: new_root = current_root ⊕ chunk_vec
+            let new_root = Arc::new(current_root.bundle(chunk_vec));
 
             // Try to update with CAS
             match self.update_root(new_root, current_version) {

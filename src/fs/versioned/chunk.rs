@@ -4,6 +4,7 @@
 //! implements versioning for chunks to enable concurrent access with optimistic locking.
 
 use crate::SparseVec;
+use std::fmt;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -112,8 +113,6 @@ impl fmt::Debug for VersionedChunk {
             .finish()
     }
 }
-
-use std::fmt;
 
 #[cfg(test)]
 mod tests {
