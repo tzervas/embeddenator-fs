@@ -41,11 +41,7 @@ pub struct VersionedChunk {
 
 impl VersionedChunk {
     /// Create a new versioned chunk
-    pub fn new(
-        vector: SparseVec,
-        original_size: usize,
-        content_hash: [u8; 8],
-    ) -> Self {
+    pub fn new(vector: SparseVec, original_size: usize, content_hash: [u8; 8]) -> Self {
         let now = Instant::now();
         Self {
             vector: Arc::new(vector),
@@ -78,7 +74,9 @@ impl VersionedChunk {
 
     /// Decrement the reference count and return the new value
     pub fn dec_ref(&self) -> u32 {
-        self.ref_count.fetch_sub(1, Ordering::AcqRel).saturating_sub(1)
+        self.ref_count
+            .fetch_sub(1, Ordering::AcqRel)
+            .saturating_sub(1)
     }
 
     /// Get the current reference count

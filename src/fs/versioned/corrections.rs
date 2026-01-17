@@ -154,10 +154,7 @@ impl VersionedCorrectionStore {
     /// This is used for inserting brand new corrections (e.g., when creating a new file)
     /// where chunk IDs are guaranteed unique and monotonically increasing, so
     /// concurrent inserts cannot conflict.
-    pub fn batch_insert_new(
-        &self,
-        updates: Vec<(u64, ChunkCorrection)>,
-    ) -> VersionedResult<u64> {
+    pub fn batch_insert_new(&self, updates: Vec<(u64, ChunkCorrection)>) -> VersionedResult<u64> {
         let mut corrections = self.corrections.write().unwrap();
         let mut stats = self.stats.write().unwrap();
 

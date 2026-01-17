@@ -10,8 +10,8 @@
 //! - Truncating files
 //! - All with optimistic locking and version tracking
 
-use crate::versioned_embrfs::{EmbrFSError, VersionedEmbrFS};
-use crate::{FileAttr, FileKind, DirEntry, Ino, ROOT_INO};
+use crate::versioned_embrfs::VersionedEmbrFS;
+use crate::{DirEntry, FileAttr, FileKind, Ino, ROOT_INO};
 use std::collections::HashMap;
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
@@ -28,6 +28,7 @@ use std::ffi::OsStr;
 ///
 /// Provides full read-write FUSE filesystem on top of VersionedEmbrFS.
 /// Manages inode assignments, directory structures, and FUSE protocol translation.
+#[allow(dead_code)]
 pub struct VersionedFUSE {
     /// The underlying versioned filesystem
     fs: Arc<VersionedEmbrFS>,
@@ -57,6 +58,7 @@ pub struct VersionedFUSE {
     entry_ttl: Duration,
 }
 
+#[allow(dead_code)]
 impl VersionedFUSE {
     /// Create a new FUSE adapter for a versioned filesystem
     pub fn new(fs: VersionedEmbrFS) -> Self {
@@ -130,7 +132,7 @@ impl VersionedFUSE {
             };
 
             let mut directories = self.directories.write().unwrap();
-            let parent_entries = directories.entry(parent_ino).or_insert_with(Vec::new);
+            let parent_entries = directories.entry(parent_ino).or_default();
 
             // Check if entry already exists
             if !parent_entries.iter().any(|e| e.name == *part) {
@@ -147,7 +149,7 @@ impl VersionedFUSE {
 
             // If it's a directory, ensure it has an entry in directories map
             if !is_file {
-                directories.entry(ino).or_insert_with(Vec::new);
+                directories.entry(ino).or_default();
             }
         }
     }
@@ -224,7 +226,7 @@ impl VersionedFUSE {
         FileAttr {
             ino,
             size,
-            blocks: (size + 4095) / 4096,
+            blocks: size.div_ceil(4096),
             atime: now,
             mtime: now,
             ctime: now,
@@ -391,12 +393,7 @@ impl Filesystem for VersionedFUSE {
         all_entries.extend_from_slice(entries);
 
         for (i, entry) in all_entries.iter().enumerate().skip(offset as usize) {
-            let full = reply.add(
-                entry.ino,
-                (i + 1) as i64,
-                entry.kind.into(),
-                &entry.name,
-            );
+            let full = reply.add(entry.ino, (i + 1) as i64, entry.kind.into(), &entry.name);
 
             if full {
                 break;

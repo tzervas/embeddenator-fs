@@ -87,7 +87,9 @@ fn test_crud_structured_data() {
         created_at: 1234567890,
     };
 
-    let version = fs.write_file("users/1.dat", &user.to_bytes(), None).unwrap();
+    let version = fs
+        .write_file("users/1.dat", &user.to_bytes(), None)
+        .unwrap();
 
     // READ
     let (data, read_version) = fs.read_file("users/1.dat").unwrap();
@@ -190,8 +192,7 @@ fn test_atomic_transaction_pattern() {
                     let rollback_data = format!("{:.2}", balance_a).as_bytes().to_vec();
                     loop {
                         let (_, current_version) = fs.read_file(account_a_path).unwrap();
-                        match fs.write_file(account_a_path, &rollback_data, Some(current_version))
-                        {
+                        match fs.write_file(account_a_path, &rollback_data, Some(current_version)) {
                             Ok(_) => break,
                             Err(_) => continue,
                         }
@@ -367,8 +368,12 @@ fn test_time_series_data() {
     for i in 0..100 {
         let timestamp = start_time + i;
         let metric = format!("{}|cpu|{:.2}", timestamp, 50.0 + (i as f64) * 0.5);
-        fs.write_file(&format!("metrics/{}.dat", timestamp), metric.as_bytes(), None)
-            .unwrap();
+        fs.write_file(
+            &format!("metrics/{}.dat", timestamp),
+            metric.as_bytes(),
+            None,
+        )
+        .unwrap();
     }
 
     // Read back time series
@@ -402,9 +407,7 @@ fn test_concurrent_read_write_mix() {
         let handle = thread::spawn(move || {
             for iteration in 0..50 {
                 let id = ((reader_id + iteration) % 100) as u64;
-                let (data, _) = fs_clone
-                    .read_file(&format!("users/{}.dat", id))
-                    .unwrap();
+                let (data, _) = fs_clone.read_file(&format!("users/{}.dat", id)).unwrap();
                 let user = User::from_bytes(&data);
                 assert_eq!(user.id, id);
             }
@@ -419,9 +422,7 @@ fn test_concurrent_read_write_mix() {
             for _ in 0..20 {
                 let id = (writer_id * 10) as u64;
                 loop {
-                    let (data, version) = fs_clone
-                        .read_file(&format!("users/{}.dat", id))
-                        .unwrap();
+                    let (data, version) = fs_clone.read_file(&format!("users/{}.dat", id)).unwrap();
                     let mut user = User::from_bytes(&data);
                     user.email = format!("updated_{}@example.com", id);
 
@@ -472,7 +473,11 @@ fn test_pessimistic_locking_pattern() {
                 let new_count = count + 1;
 
                 fs_clone
-                    .write_file("counter.dat", new_count.to_string().as_bytes(), Some(version))
+                    .write_file(
+                        "counter.dat",
+                        new_count.to_string().as_bytes(),
+                        Some(version),
+                    )
                     .unwrap();
 
                 // Lock released when _guard drops
@@ -513,20 +518,18 @@ fn test_multi_version_consistency() {
         let fs_clone = Arc::clone(&fs);
         let versions_clone = Arc::clone(&versions);
 
-        let handle = thread::spawn(move || {
-            loop {
-                let (data, version) = fs_clone.read_file("user.dat").unwrap();
-                let mut user = User::from_bytes(&data);
-                user.email = format!("alice@v{}.com", i);
+        let handle = thread::spawn(move || loop {
+            let (data, version) = fs_clone.read_file("user.dat").unwrap();
+            let mut user = User::from_bytes(&data);
+            user.email = format!("alice@v{}.com", i);
 
-                match fs_clone.write_file("user.dat", &user.to_bytes(), Some(version)) {
-                    Ok(new_version) => {
-                        versions_clone.lock().unwrap().push(new_version);
-                        break;
-                    }
-                    Err(EmbrFSError::VersionMismatch { .. }) => continue,
-                    Err(e) => panic!("Unexpected error: {:?}", e),
+            match fs_clone.write_file("user.dat", &user.to_bytes(), Some(version)) {
+                Ok(new_version) => {
+                    versions_clone.lock().unwrap().push(new_version);
+                    break;
                 }
+                Err(EmbrFSError::VersionMismatch { .. }) => continue,
+                Err(e) => panic!("Unexpected error: {:?}", e),
             }
         });
         handles.push(handle);
@@ -542,7 +545,10 @@ fn test_multi_version_consistency() {
 
     let mut sorted = versions.clone();
     sorted.sort();
-    assert_eq!(*versions, sorted, "Versions should be monotonically increasing");
+    assert_eq!(
+        *versions, sorted,
+        "Versions should be monotonically increasing"
+    );
 }
 
 #[test]
@@ -551,8 +557,12 @@ fn test_snapshot_isolation() {
 
     // Create 10 records
     for i in 0..10 {
-        fs.write_file(&format!("record_{}.dat", i), format!("value_{}", i).as_bytes(), None)
-            .unwrap();
+        fs.write_file(
+            &format!("record_{}.dat", i),
+            format!("value_{}", i).as_bytes(),
+            None,
+        )
+        .unwrap();
     }
 
     // Take snapshot (read all versions)

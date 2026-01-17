@@ -6,6 +6,10 @@
 
 A holographic filesystem implementation using Vector Symbolic Architecture (VSA) for encoding entire directory trees into high-dimensional sparse vectors with bit-perfect reconstruction guarantees.
 
+**Independent component** extracted from the Embeddenator monolithic repository. Part of the [Embeddenator workspace](https://github.com/tzervas/embeddenator).
+
+**Repository:** [https://github.com/tzervas/embeddenator-fs](https://github.com/tzervas/embeddenator-fs)
+
 **Status:** Alpha - Core functionality complete, API may change. Suitable for experimental use and research.
 
 ## What is EmbrFS?
@@ -147,6 +151,135 @@ mount_embrfs(fs, mountpoint, &[])?;
 - No symbolic links (readlink returns ENOSYS)
 - Simplified permission model
 - Requires root or user_allow_other in /etc/fuse.conf
+
+## Command-Line Interface
+
+The `embeddenator-fs` CLI provides convenient access to all filesystem operations:
+
+### Installation
+
+```bash
+# From source
+cargo install --path embeddenator-fs
+
+# Or build locally
+cargo build --release --manifest-path embeddenator-fs/Cargo.toml
+```
+
+### CLI Commands
+
+#### Ingest files into engram
+```bash
+embeddenator-fs ingest -i ./mydata -e data.engram -v
+embeddenator-fs ingest -i file1.txt -i file2.txt -e files.engram
+```
+
+#### Extract files from engram
+```bash
+embeddenator-fs extract -e data.engram -o ./restored -v
+```
+
+#### Query for similar files
+```bash
+embeddenator-fs query -e data.engram -q search.txt -k 10
+```
+
+#### List files in engram
+```bash
+embeddenator-fs list -e data.engram -v
+```
+
+#### Show engram information
+```bash
+embeddenator-fs info -e data.engram
+```
+
+#### Verify engram integrity
+```bash
+embeddenator-fs verify -e data.engram -v
+```
+
+#### Incremental updates
+```bash
+# Add a new file
+embeddenator-fs update add -e data.engram -f newfile.txt
+
+# Remove a file (soft delete)
+embeddenator-fs update remove -e data.engram -p oldfile.txt
+
+# Modify an existing file
+embeddenator-fs update modify -e data.engram -f updated.txt
+
+# Compact engram (hard rebuild)
+embeddenator-fs update compact -e data.engram -v
+```
+
+### CLI Features
+
+- ✅ User-friendly progress indicators
+- ✅ Verbose mode for detailed output
+- ✅ Helpful error messages
+- ✅ Performance statistics
+- ✅ Bit-perfect verification
+- ✅ Incremental operations
+
+## Examples
+
+The `examples/` directory contains runnable examples:
+
+### Basic Ingestion
+```bash
+cargo run --example basic_ingest
+```
+Demonstrates simple file ingestion and extraction with verification.
+
+### Query Files
+```bash
+cargo run --example query_files
+```
+Shows how to query for similar files in an engram using VSA cosine similarity.
+
+### Incremental Updates
+```bash
+cargo run --example incremental_update
+```
+Demonstrates add/modify/remove operations and compaction.
+
+### Batch Processing
+```bash
+cargo run --example batch_processing --release
+```
+Tests performance with larger numbers of files (100+ files, 4KB each).
+
+## Benchmarks
+
+Performance benchmarks using Criterion:
+
+### Running Benchmarks
+
+```bash
+# Run all benchmarks
+cargo bench --manifest-path embeddenator-fs/Cargo.toml
+
+# Run specific benchmark
+cargo bench --bench ingest_benchmark
+cargo bench --bench query_benchmark
+cargo bench --bench incremental_benchmark
+```
+
+### Benchmark Coverage
+
+- **Ingestion benchmarks**: Single files (1KB-10MB), multiple small files (10-100), large files, nested directories
+- **Query benchmarks**: Codebook queries, path-sweep queries, scaling with file count, index build time
+- **Incremental benchmarks**: Add file, remove file, modify file, compact, sequential adds
+
+### Expected Performance
+
+- **Ingestion**: 20-50 MB/s (debug), 50-100+ MB/s (release)
+- **Extraction**: 50-100 MB/s (debug), 100-200+ MB/s (release)
+- **Queries**: Sub-millisecond for small codebooks, milliseconds for large
+- **Incremental adds**: ~1-5ms per file
+- **Compaction**: Similar to full re-ingestion
 
 ### Hierarchical Sub-Engrams
 

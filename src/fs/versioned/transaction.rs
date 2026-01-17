@@ -22,37 +22,19 @@ pub enum TransactionStatus {
 #[derive(Debug, Clone)]
 pub enum Operation {
     /// Add a new chunk to the codebook
-    AddChunk {
-        chunk_id: ChunkId,
-        data: Vec<u8>,
-    },
+    AddChunk { chunk_id: ChunkId, data: Vec<u8> },
     /// Update an existing chunk
-    UpdateChunk {
-        chunk_id: ChunkId,
-        data: Vec<u8>,
-    },
+    UpdateChunk { chunk_id: ChunkId, data: Vec<u8> },
     /// Remove a chunk
-    RemoveChunk {
-        chunk_id: ChunkId,
-    },
+    RemoveChunk { chunk_id: ChunkId },
     /// Add a new file to the manifest
-    AddFile {
-        path: String,
-        chunks: Vec<ChunkId>,
-    },
+    AddFile { path: String, chunks: Vec<ChunkId> },
     /// Update an existing file
-    UpdateFile {
-        path: String,
-        chunks: Vec<ChunkId>,
-    },
+    UpdateFile { path: String, chunks: Vec<ChunkId> },
     /// Remove a file
-    RemoveFile {
-        path: String,
-    },
+    RemoveFile { path: String },
     /// Bundle chunks into root
-    BundleRoot {
-        chunk_ids: Vec<ChunkId>,
-    },
+    BundleRoot { chunk_ids: Vec<ChunkId> },
 }
 
 /// A transaction

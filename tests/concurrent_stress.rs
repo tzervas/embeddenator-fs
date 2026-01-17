@@ -163,16 +163,27 @@ fn test_concurrent_create_delete() {
 
                 // Create
                 let result = fs_clone.write_file(&path, &data, None);
-                assert!(result.is_ok(), "Failed to create file {}: {:?}", path, result);
+                assert!(
+                    result.is_ok(),
+                    "Failed to create file {}: {:?}",
+                    path,
+                    result
+                );
 
                 // Read
-                let (read_data, version) = fs_clone.read_file(&path)
+                let (read_data, version) = fs_clone
+                    .read_file(&path)
                     .expect(&format!("Failed to read {}", path));
                 assert_eq!(read_data, data);
 
                 // Delete
                 let result = fs_clone.delete_file(&path, version);
-                assert!(result.is_ok(), "Failed to delete file {}: {:?}", path, result);
+                assert!(
+                    result.is_ok(),
+                    "Failed to delete file {}: {:?}",
+                    path,
+                    result
+                );
 
                 // Verify deleted
                 assert!(!fs_clone.exists(&path));

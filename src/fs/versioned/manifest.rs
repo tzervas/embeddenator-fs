@@ -213,11 +213,7 @@ impl VersionedManifest {
     /// Remove a file (soft delete)
     ///
     /// Marks the file as deleted without removing it from the manifest.
-    pub fn remove_file(
-        &self,
-        path: &str,
-        expected_file_version: u64,
-    ) -> VersionedResult<u64> {
+    pub fn remove_file(&self, path: &str, expected_file_version: u64) -> VersionedResult<u64> {
         let mut files = self.files.write().unwrap();
         let index = self.file_index.read().unwrap();
 
@@ -295,8 +291,7 @@ impl VersionedManifest {
 
         // Filter out deleted files
         let old_len = files.len();
-        let new_files: Vec<VersionedFileEntry> =
-            files.drain(..).filter(|f| !f.deleted).collect();
+        let new_files: Vec<VersionedFileEntry> = files.drain(..).filter(|f| !f.deleted).collect();
         let removed = old_len - new_files.len();
 
         // Rebuild index
@@ -381,12 +376,7 @@ mod tests {
     #[test]
     fn test_add_file() {
         let manifest = VersionedManifest::new();
-        let entry = VersionedFileEntry::new(
-            "test.txt".to_string(),
-            true,
-            100,
-            vec![1, 2, 3],
-        );
+        let entry = VersionedFileEntry::new("test.txt".to_string(), true, 100, vec![1, 2, 3]);
 
         let version = manifest.add_file(entry).unwrap();
         assert_eq!(version, 1);
@@ -397,12 +387,7 @@ mod tests {
     #[test]
     fn test_update_file() {
         let manifest = VersionedManifest::new();
-        let entry = VersionedFileEntry::new(
-            "test.txt".to_string(),
-            true,
-            100,
-            vec![1, 2, 3],
-        );
+        let entry = VersionedFileEntry::new("test.txt".to_string(), true, 100, vec![1, 2, 3]);
 
         manifest.add_file(entry.clone()).unwrap();
 
@@ -420,12 +405,7 @@ mod tests {
     #[test]
     fn test_remove_file() {
         let manifest = VersionedManifest::new();
-        let entry = VersionedFileEntry::new(
-            "test.txt".to_string(),
-            true,
-            100,
-            vec![1, 2, 3],
-        );
+        let entry = VersionedFileEntry::new("test.txt".to_string(), true, 100, vec![1, 2, 3]);
 
         manifest.add_file(entry).unwrap();
         manifest.remove_file("test.txt", 0).unwrap();
@@ -440,12 +420,7 @@ mod tests {
         let manifest = VersionedManifest::new();
 
         for i in 0..10 {
-            let entry = VersionedFileEntry::new(
-                format!("file{}.txt", i),
-                true,
-                100,
-                vec![i],
-            );
+            let entry = VersionedFileEntry::new(format!("file{}.txt", i), true, 100, vec![i]);
             manifest.add_file(entry).unwrap();
         }
 
@@ -467,12 +442,7 @@ mod tests {
         let manifest = VersionedManifest::new();
 
         for i in 0..5 {
-            let entry = VersionedFileEntry::new(
-                format!("file{}.txt", i),
-                true,
-                100,
-                vec![i],
-            );
+            let entry = VersionedFileEntry::new(format!("file{}.txt", i), true, 100, vec![i]);
             manifest.add_file(entry).unwrap();
         }
 

@@ -198,9 +198,10 @@ impl VersionedEmbrFS {
                 .ok_or(EmbrFSError::ChunkNotFound(chunk_id))?;
 
             // Decode chunk
-            let decoded = chunk
-                .vector
-                .decode_data(&self.config, Some(&file_entry.path), DEFAULT_CHUNK_SIZE);
+            let decoded =
+                chunk
+                    .vector
+                    .decode_data(&self.config, Some(&file_entry.path), DEFAULT_CHUNK_SIZE);
 
             // Apply correction
             let corrected = self
@@ -304,7 +305,8 @@ impl VersionedEmbrFS {
             chunk_updates.push((chunk_id, versioned_chunk));
 
             // Prepare correction
-            let correction = crate::correction::ChunkCorrection::new(chunk_id as u64, chunk_data, &decoded);
+            let correction =
+                crate::correction::ChunkCorrection::new(chunk_id as u64, chunk_data, &decoded);
             corrections_to_add.push((chunk_id as u64, correction));
 
             chunk_ids.push(chunk_id);
@@ -316,7 +318,8 @@ impl VersionedEmbrFS {
             self.chunk_store.batch_insert_new(chunk_updates)?;
         } else {
             // Existing file - use versioned update with optimistic locking
-            self.chunk_store.batch_insert(chunk_updates, store_version)?;
+            self.chunk_store
+                .batch_insert(chunk_updates, store_version)?;
         }
 
         // 6. Add corrections (after chunk store update)
@@ -326,16 +329,17 @@ impl VersionedEmbrFS {
         } else {
             // Existing file - use versioned batch update
             let corrections_version = self.corrections.current_version();
-            self.corrections.batch_update(corrections_to_add, corrections_version)?;
+            self.corrections
+                .batch_update(corrections_to_add, corrections_version)?;
         }
 
         // 6. Update manifest
         let is_text = is_text_data(data);
-        let new_entry = VersionedFileEntry::new(path.to_string(), is_text, data.len(), chunk_ids.clone());
+        let new_entry =
+            VersionedFileEntry::new(path.to_string(), is_text, data.len(), chunk_ids.clone());
 
         let file_version = if let Some((entry, _)) = existing {
-            self.manifest
-                .update_file(path, new_entry, entry.version)?;
+            self.manifest.update_file(path, new_entry, entry.version)?;
             entry.version + 1
         } else {
             self.manifest.add_file(new_entry)?;
@@ -509,9 +513,7 @@ mod tests {
         let v1 = fs.write_file("test.txt", b"version 1", None).unwrap();
 
         // Update with correct version
-        let v2 = fs
-            .write_file("test.txt", b"version 2", Some(v1))
-            .unwrap();
+        let v2 = fs.write_file("test.txt", b"version 2", Some(v1)).unwrap();
         assert_eq!(v2, v1 + 1);
 
         // Try to update with stale version (should fail)

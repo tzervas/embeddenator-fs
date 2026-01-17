@@ -152,7 +152,12 @@ impl VersionedEngram {
                     std::thread::sleep(std::time::Duration::from_micros(1 << attempt));
                     continue;
                 }
-                Err(e) => return Err(format!("Failed to bundle chunk after {} attempts: {}", MAX_RETRIES, e)),
+                Err(e) => {
+                    return Err(format!(
+                        "Failed to bundle chunk after {} attempts: {}",
+                        MAX_RETRIES, e
+                    ))
+                }
             }
         }
 

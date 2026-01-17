@@ -24,7 +24,9 @@ fn create_test_data(size_mb: usize, pattern: TestDataPattern) -> Vec<u8> {
         TestDataPattern::Compressible => {
             // Repeating pattern that compresses well
             let pattern = b"The quick brown fox jumps over the lazy dog. ";
-            (0..size_bytes).map(|i| pattern[i % pattern.len()]).collect()
+            (0..size_bytes)
+                .map(|i| pattern[i % pattern.len()])
+                .collect()
         }
         TestDataPattern::Text => {
             // ASCII text pattern
@@ -217,16 +219,12 @@ fn test_update_large_file() {
 
     // Update to 30MB
     let data2 = create_test_data(30, TestDataPattern::Random);
-    let v2 = fs
-        .write_file("update_test.bin", &data2, Some(v1))
-        .unwrap();
+    let v2 = fs.write_file("update_test.bin", &data2, Some(v1)).unwrap();
     assert!(v2 > v1);
 
     // Update to 15MB (shrink)
     let data3 = create_test_data(15, TestDataPattern::Compressible);
-    let v3 = fs
-        .write_file("update_test.bin", &data3, Some(v2))
-        .unwrap();
+    let v3 = fs.write_file("update_test.bin", &data3, Some(v2)).unwrap();
     assert!(v3 > v2);
 
     // Verify final content

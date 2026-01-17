@@ -68,7 +68,9 @@ impl VersionedChunkStore {
     pub fn get(&self, chunk_id: ChunkId) -> Option<(Arc<VersionedChunk>, u64)> {
         let chunks = self.chunks.read().unwrap();
         let version = self.version();
-        chunks.get(&chunk_id).map(|chunk| (Arc::clone(chunk), version))
+        chunks
+            .get(&chunk_id)
+            .map(|chunk| (Arc::clone(chunk), version))
     }
 
     /// Check if a chunk with the given content hash already exists (deduplication)
@@ -77,7 +79,9 @@ impl VersionedChunkStore {
         let chunks = self.chunks.read().unwrap();
 
         hash_index.get(content_hash).and_then(|&chunk_id| {
-            chunks.get(&chunk_id).map(|chunk| (chunk_id, Arc::clone(chunk)))
+            chunks
+                .get(&chunk_id)
+                .map(|chunk| (chunk_id, Arc::clone(chunk)))
         })
     }
 

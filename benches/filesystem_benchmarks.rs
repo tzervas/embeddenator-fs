@@ -381,8 +381,7 @@ fn bench_random_data(c: &mut Criterion) {
         let fs = VersionedEmbrFS::new();
 
         b.iter(|| {
-            fs.write_file("random.dat", black_box(&data), None)
-                .unwrap();
+            fs.write_file("random.dat", black_box(&data), None).unwrap();
         });
     });
 
@@ -468,21 +467,16 @@ criterion_group!(
     bench_concurrent_updates_different_files,
 );
 
-criterion_group!(
+criterion_group!(scalability, bench_many_small_files, bench_file_listing,);
+
+criterion_group!(content_types, bench_compressible_data, bench_random_data,);
+
+criterion_group!(transactions, bench_optimistic_locking_contention,);
+
+criterion_main!(
+    basic_ops,
+    concurrent_ops,
     scalability,
-    bench_many_small_files,
-    bench_file_listing,
-);
-
-criterion_group!(
     content_types,
-    bench_compressible_data,
-    bench_random_data,
+    transactions
 );
-
-criterion_group!(
-    transactions,
-    bench_optimistic_locking_contention,
-);
-
-criterion_main!(basic_ops, concurrent_ops, scalability, content_types, transactions);
