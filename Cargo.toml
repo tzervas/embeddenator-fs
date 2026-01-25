@@ -29,6 +29,7 @@ sha2 = ">=0.10, <1.0"
 # Core embeddenator dependencies (path for dev, semver for publish)
 embeddenator-vsa = { path = "../embeddenator-vsa", version = ">=0.20.1, <1.0.0" }
 embeddenator-retrieval = { path = "../embeddenator-retrieval", version = ">=0.20.0, <1.0.0" }
+embeddenator-io = { path = "../embeddenator-io", version = ">=0.20.0, <1.0.0", features = ["compression-zstd", "compression-lz4"] }
 
 [dependencies.clap]
 version = ">=4.5, <5.0"

@@ -52,6 +52,9 @@ use crate::versioned::{
     VersionedManifest,
 };
 use crate::ReversibleVSAConfig;
+use embeddenator_io::{
+    unwrap_auto, wrap_or_legacy, CompressionCodec, CompressionProfiler, PayloadKind,
+};
 use embeddenator_vsa::SparseVec;
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -128,6 +131,9 @@ pub struct VersionedEmbrFS {
     /// VSA configuration
     config: ReversibleVSAConfig,
 
+    /// Compression profiler for path-based compression selection
+    profiler: CompressionProfiler,
+
     /// Global filesystem version
     global_version: Arc<AtomicU64>,
 
@@ -143,6 +149,14 @@ impl VersionedEmbrFS {
 
     /// Create a new mutable filesystem with custom VSA configuration
     pub fn with_config(config: ReversibleVSAConfig) -> Self {
+        Self::with_config_and_profiler(config, CompressionProfiler::default())
+    }
+
+    /// Create a new mutable filesystem with custom VSA configuration and compression profiler
+    pub fn with_config_and_profiler(
+        config: ReversibleVSAConfig,
+        profiler: CompressionProfiler,
+    ) -> Self {
         Self {
             root: Arc::new(RwLock::new(Arc::new(SparseVec::new()))),
             root_version: Arc::new(AtomicU64::new(0)),
@@ -150,9 +164,15 @@ impl VersionedEmbrFS {
             corrections: VersionedCorrectionStore::new(),
             manifest: VersionedManifest::new(),
             config,
+            profiler,
             global_version: Arc::new(AtomicU64::new(0)),
             next_chunk_id: Arc::new(AtomicU64::new(1)),
         }
+    }
+
+    /// Get the compression profiler
+    pub fn profiler(&self) -> &CompressionProfiler {
+        &self.profiler
     }
 
     /// Get the current global version
@@ -216,7 +236,20 @@ impl VersionedEmbrFS {
         // Truncate to exact file size
         file_data.truncate(file_entry.size);
 
-        Ok((file_data, file_entry.version))
+        // 3. Decompress if file was stored compressed
+        let final_data = if let Some(codec) = file_entry.compression_codec {
+            if codec != 0 {
+                // Use unwrap_auto which auto-detects envelope format
+                unwrap_auto(PayloadKind::EngramBincode, &file_data)
+                    .map_err(|e| EmbrFSError::IoError(format!("Decompression failed: {}", e)))?
+            } else {
+                file_data
+            }
+        } else {
+            file_data
+        };
+
+        Ok((final_data, file_entry.version))
     }
 
     /// Write a file's contents
@@ -350,6 +383,168 @@ impl VersionedEmbrFS {
         self.bundle_chunks_to_root(&chunk_ids)?;
 
         // 8. Increment global version
+        self.global_version.fetch_add(1, Ordering::AcqRel);
+
+        Ok(file_version)
+    }
+
+    /// Write a file's contents with path-based automatic compression
+    ///
+    /// Uses the compression profiler to automatically select the appropriate
+    /// compression codec based on the file path. For example, config files
+    /// in /etc get fast LZ4 compression, kernel images get maximum zstd
+    /// compression, and pre-compressed media files skip compression entirely.
+    ///
+    /// If `expected_version` is provided, performs optimistic locking - the write
+    /// will fail with VersionMismatch if the file has been modified since the version
+    /// was read.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use embeddenator_fs::VersionedEmbrFS;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let fs = VersionedEmbrFS::new();
+    ///
+    /// // Config file gets fast LZ4 compression automatically
+    /// let version = fs.write_file_compressed("/etc/nginx.conf", b"worker_processes 4;", None)?;
+    ///
+    /// // Kernel image gets maximum zstd compression
+    /// let kernel_data = std::fs::read("/boot/vmlinuz")?;
+    /// fs.write_file_compressed("/boot/vmlinuz", &kernel_data, None)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn write_file_compressed(
+        &self,
+        path: &str,
+        data: &[u8],
+        expected_version: Option<u64>,
+    ) -> Result<u64, EmbrFSError> {
+        // 1. Get compression profile for this path
+        let profile = self.profiler.for_path(path);
+        let write_opts = profile.to_write_options();
+
+        // 2. Compress data using the selected profile
+        let (compressed_data, codec_byte) = if write_opts.codec == CompressionCodec::None {
+            // No compression - store as-is
+            (data.to_vec(), 0u8)
+        } else {
+            // Wrap with envelope format (includes compression)
+            let wrapped = wrap_or_legacy(PayloadKind::EngramBincode, write_opts, data)
+                .map_err(|e| EmbrFSError::IoError(format!("Compression failed: {}", e)))?;
+            let codec = match write_opts.codec {
+                CompressionCodec::None => 0,
+                CompressionCodec::Zstd => 1,
+                CompressionCodec::Lz4 => 2,
+            };
+            (wrapped, codec)
+        };
+
+        // 3. Check existing file
+        let existing = self.manifest.get_file(path);
+
+        match (&existing, expected_version) {
+            (Some((entry, _)), Some(expected_ver)) => {
+                if entry.version != expected_ver {
+                    return Err(EmbrFSError::VersionMismatch {
+                        expected: expected_ver,
+                        actual: entry.version,
+                    });
+                }
+            }
+            (Some(_), None) => {
+                return Err(EmbrFSError::FileExists(path.to_string()));
+            }
+            (None, Some(_)) => {
+                return Err(EmbrFSError::FileNotFound(path.to_string()));
+            }
+            (None, None) => {}
+        }
+
+        // 4. Chunk the compressed data
+        let chunks = self.chunk_data(&compressed_data);
+        let mut chunk_ids = Vec::new();
+
+        // 5. Get current chunk store version
+        let store_version = self.chunk_store.version();
+
+        // 6. Encode chunks and build updates
+        let mut chunk_updates = Vec::new();
+        let mut corrections_to_add = Vec::new();
+
+        for chunk_data in chunks {
+            let chunk_id = self.allocate_chunk_id();
+
+            // Encode chunk
+            let chunk_vec = SparseVec::encode_data(chunk_data, &self.config, Some(path));
+
+            // Immediately verify
+            let decoded = chunk_vec.decode_data(&self.config, Some(path), chunk_data.len());
+
+            // Compute content hash
+            let mut hasher = Sha256::new();
+            hasher.update(chunk_data);
+            let hash = hasher.finalize();
+            let mut hash_bytes = [0u8; 8];
+            hash_bytes.copy_from_slice(&hash[0..8]);
+
+            // Create versioned chunk
+            let versioned_chunk = VersionedChunk::new(chunk_vec, chunk_data.len(), hash_bytes);
+            chunk_updates.push((chunk_id, versioned_chunk));
+
+            // Prepare correction
+            let correction =
+                crate::correction::ChunkCorrection::new(chunk_id as u64, chunk_data, &decoded);
+            corrections_to_add.push((chunk_id as u64, correction));
+
+            chunk_ids.push(chunk_id);
+        }
+
+        // 7. Batch insert chunks into store
+        if expected_version.is_none() {
+            self.chunk_store.batch_insert_new(chunk_updates)?;
+        } else {
+            self.chunk_store
+                .batch_insert(chunk_updates, store_version)?;
+        }
+
+        // 8. Add corrections
+        if expected_version.is_none() {
+            self.corrections.batch_insert_new(corrections_to_add)?;
+        } else {
+            let corrections_version = self.corrections.current_version();
+            self.corrections
+                .batch_update(corrections_to_add, corrections_version)?;
+        }
+
+        // 9. Update manifest with compression metadata
+        let is_text = is_text_data(data);
+        let new_entry = if codec_byte == 0 {
+            VersionedFileEntry::new(path.to_string(), is_text, data.len(), chunk_ids.clone())
+        } else {
+            VersionedFileEntry::new_compressed(
+                path.to_string(),
+                is_text,
+                compressed_data.len(),
+                data.len(),
+                codec_byte,
+                chunk_ids.clone(),
+            )
+        };
+
+        let file_version = if let Some((entry, _)) = existing {
+            self.manifest.update_file(path, new_entry, entry.version)?;
+            entry.version + 1
+        } else {
+            self.manifest.add_file(new_entry)?;
+            0
+        };
+
+        // 10. Bundle chunks into root
+        self.bundle_chunks_to_root(&chunk_ids)?;
+
+        // 11. Increment global version
         self.global_version.fetch_add(1, Ordering::AcqRel);
 
         Ok(file_version)
@@ -576,5 +771,67 @@ mod tests {
         assert_eq!(stats.total_files, 2);
         assert_eq!(stats.deleted_files, 0);
         assert_eq!(stats.total_size_bytes, 10);
+    }
+
+    #[test]
+    fn test_write_and_read_compressed_file() {
+        let fs = VersionedEmbrFS::new();
+
+        // Config files get LZ4 compression
+        let config_data = b"[server]\nport = 8080\nhost = localhost";
+        let version = fs
+            .write_file_compressed("/etc/app.conf", config_data, None)
+            .unwrap();
+        assert_eq!(version, 0);
+
+        // Read it back - should auto-decompress
+        let (content, read_version) = fs.read_file("/etc/app.conf").unwrap();
+        assert_eq!(&content[..], config_data);
+        assert_eq!(read_version, 0);
+    }
+
+    #[test]
+    fn test_write_compressed_with_zstd_profile() {
+        let fs = VersionedEmbrFS::new();
+
+        // Binary files get zstd compression
+        let binary_data: Vec<u8> = (0..1000).map(|i| [0xDE, 0xAD, 0xBE, 0xEF][i % 4]).collect();
+        let version = fs
+            .write_file_compressed("/usr/bin/myapp", &binary_data, None)
+            .unwrap();
+        assert_eq!(version, 0);
+
+        // Read it back
+        let (content, _) = fs.read_file("/usr/bin/myapp").unwrap();
+        assert_eq!(content, binary_data);
+    }
+
+    #[test]
+    fn test_write_compressed_no_compression_for_media() {
+        let fs = VersionedEmbrFS::new();
+
+        // Media files skip compression (already compressed)
+        let media_data: Vec<u8> = (0..500).map(|i| [0xFF, 0xD8, 0xFF, 0xE0][i % 4]).collect();
+        let version = fs
+            .write_file_compressed("/photos/image.jpg", &media_data, None)
+            .unwrap();
+        assert_eq!(version, 0);
+
+        // Read it back - no decompression needed
+        let (content, _) = fs.read_file("/photos/image.jpg").unwrap();
+        assert_eq!(content, media_data);
+    }
+
+    #[test]
+    fn test_profiler_access() {
+        let fs = VersionedEmbrFS::new();
+        let profiler = fs.profiler();
+
+        // Test profile selection
+        let kernel_profile = profiler.for_path("/boot/vmlinuz");
+        assert_eq!(kernel_profile.name, "Kernel");
+
+        let config_profile = profiler.for_path("/etc/nginx.conf");
+        assert_eq!(config_profile.name, "Config");
     }
 }

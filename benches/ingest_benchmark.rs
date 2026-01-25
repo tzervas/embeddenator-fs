@@ -8,7 +8,6 @@
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use embeddenator_fs::{EmbrFS, ReversibleVSAConfig};
 use std::fs;
-use std::path::PathBuf;
 
 fn create_test_data(size_bytes: usize, pattern: u8) -> Vec<u8> {
     vec![pattern; size_bytes]

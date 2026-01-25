@@ -27,6 +27,13 @@ pub struct VersionedFileEntry {
     /// Is this file marked as deleted? (soft delete)
     pub deleted: bool,
 
+    /// Compression codec used (0=None, 1=Zstd, 2=Lz4)
+    /// None means no compression (backward compatible)
+    pub compression_codec: Option<u8>,
+
+    /// Original uncompressed size (for compressed files)
+    pub uncompressed_size: Option<usize>,
+
     /// Version number of this file entry
     pub version: u64,
 
@@ -47,6 +54,32 @@ impl VersionedFileEntry {
             size,
             chunks,
             deleted: false,
+            compression_codec: None,
+            uncompressed_size: None,
+            version: 0,
+            created_at: now,
+            modified_at: now,
+        }
+    }
+
+    /// Create a new file entry with compression metadata
+    pub fn new_compressed(
+        path: String,
+        is_text: bool,
+        compressed_size: usize,
+        uncompressed_size: usize,
+        compression_codec: u8,
+        chunks: Vec<ChunkId>,
+    ) -> Self {
+        let now = Instant::now();
+        Self {
+            path,
+            is_text,
+            size: compressed_size,
+            chunks,
+            deleted: false,
+            compression_codec: Some(compression_codec),
+            uncompressed_size: Some(uncompressed_size),
             version: 0,
             created_at: now,
             modified_at: now,
@@ -61,6 +94,30 @@ impl VersionedFileEntry {
             size: new_size,
             chunks: new_chunks,
             deleted: false,
+            compression_codec: self.compression_codec,
+            uncompressed_size: self.uncompressed_size,
+            version: self.version + 1,
+            created_at: self.created_at,
+            modified_at: Instant::now(),
+        }
+    }
+
+    /// Create an updated version with new compression settings
+    pub fn update_compressed(
+        &self,
+        new_chunks: Vec<ChunkId>,
+        compressed_size: usize,
+        uncompressed_size: usize,
+        compression_codec: u8,
+    ) -> Self {
+        Self {
+            path: self.path.clone(),
+            is_text: self.is_text,
+            size: compressed_size,
+            chunks: new_chunks,
+            deleted: false,
+            compression_codec: Some(compression_codec),
+            uncompressed_size: Some(uncompressed_size),
             version: self.version + 1,
             created_at: self.created_at,
             modified_at: Instant::now(),

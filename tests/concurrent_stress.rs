@@ -173,7 +173,7 @@ fn test_concurrent_create_delete() {
                 // Read
                 let (read_data, version) = fs_clone
                     .read_file(&path)
-                    .expect(&format!("Failed to read {}", path));
+                    .unwrap_or_else(|_| panic!("Failed to read {}", path));
                 assert_eq!(read_data, data);
 
                 // Delete

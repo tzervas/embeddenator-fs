@@ -7,7 +7,6 @@
 
 use embeddenator_fs::{EmbrFS, ReversibleVSAConfig};
 use std::fs;
-use std::path::PathBuf;
 
 fn main() -> std::io::Result<()> {
     println!("=== Basic Ingestion Example ===\n");
