@@ -771,7 +771,7 @@ impl fuser::Filesystem for EngramFS {
         let total_files = self.file_count() as u64;
         let total_size = self.total_size();
         let block_size = 4096u64;
-        let total_blocks = (total_size + block_size - 1) / block_size;
+        let total_blocks = total_size.div_ceil(block_size);
 
         reply.statfs(
             total_blocks,      // blocks - total data blocks
