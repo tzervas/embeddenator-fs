@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.22.0] - 2026-01-25
+
+### Added
+- Full CLI binary with 9 commands (ingest, extract, query, list, info, verify, update, compact, help)
+- 4 production examples (basic_ingest, query_files, incremental_update, batch_processing)
+- 3 comprehensive benchmark suites (13 groups total)
+
+### Changed
+- Performance improvements: 8.12 MB/s ingest, 9.31 MB/s extract
+- API stabilized for production use
+
 ## [0.20.0-alpha.3] - 2026-01-14
 
 ### Added

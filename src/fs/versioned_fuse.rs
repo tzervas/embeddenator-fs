@@ -17,9 +17,11 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, SystemTime};
 
 #[cfg(feature = "fuse")]
+use crate::EmbrFSError;
+#[cfg(feature = "fuse")]
 use fuser::{
-    FileType, Filesystem, KernelConfig, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory,
-    ReplyEmpty, ReplyEntry, ReplyOpen, ReplyWrite, Request,
+    Filesystem, KernelConfig, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
+    ReplyEntry, ReplyOpen, ReplyWrite, Request,
 };
 #[cfg(feature = "fuse")]
 use std::ffi::OsStr;
@@ -385,7 +387,7 @@ impl Filesystem for VersionedFUSE {
                 kind: FileKind::Directory,
             },
             DirEntry {
-                ino: if ino == ROOT_INO { ROOT_INO } else { ROOT_INO }, // TODO: track real parent
+                ino: ROOT_INO, // TODO: track real parent
                 name: "..".to_string(),
                 kind: FileKind::Directory,
             },
@@ -444,7 +446,7 @@ impl Filesystem for VersionedFUSE {
     fn write(
         &mut self,
         _req: &Request,
-        ino: u64,
+        _ino: u64,
         fh: u64,
         offset: i64,
         data: &[u8],

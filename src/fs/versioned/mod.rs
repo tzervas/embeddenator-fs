@@ -75,30 +75,33 @@
 //!
 //! ## Usage Example
 //!
-//! ```rust,no_run
+//! ```rust,ignore
 //! # use embeddenator_fs::versioned::*;
+//! # use embeddenator_fs::VersionedEmbrFS;
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! // Create versioned engram
-//! let engram = VersionedEngram::new();
+//! // Create versioned filesystem
+//! let fs = VersionedEmbrFS::new();
+//!
+//! // Write a file
+//! let version = fs.write_file("path/to/file", b"hello world", None)?;
 //!
 //! // Read with snapshot isolation (non-blocking)
-//! let (data, version) = engram.read_file("path/to/file")?;
+//! let (data, version) = fs.read_file("path/to/file")?;
 //!
 //! // Process data...
-//! let modified_data = process(data);
+//! let modified_data = process(&data);
 //!
 //! // Write with optimistic locking
-//! match engram.write_file("path/to/file", &modified_data, Some(version)) {
+//! match fs.write_file("path/to/file", &modified_data, Some(version)) {
 //!     Ok(new_version) => println!("Write succeeded: v{}", new_version),
-//!     Err(VersionMismatch { expected, actual }) => {
-//!         println!("Conflict detected: expected v{}, got v{}", expected, actual);
+//!     Err(e) => {
+//!         println!("Write failed: {:?}", e);
 //!         // Retry logic here
 //!     },
-//!     Err(e) => return Err(e.into()),
 //! }
 //! # Ok(())
 //! # }
-//! # fn process(data: Vec<u8>) -> Vec<u8> { data }
+//! # fn process(data: &[u8]) -> Vec<u8> { data.to_vec() }
 //! ```
 
 pub mod chunk;
