@@ -1,6 +1,6 @@
 [package]
 name = "embeddenator-fs"
-version = "0.22.0"
+version = "0.23.0"
 edition = "2021"
 authors = ["Tyler Zervas <tz-dev@vectorweight.com>"]
 description = "EmbrFS: FUSE filesystem backed by holographic engrams"
@@ -27,7 +27,7 @@ rustc-hash = ">=2.0, <3.0"
 sha2 = ">=0.10, <1.0"
 
 # Core embeddenator dependencies (path for dev, semver for publish)
-embeddenator-vsa = { path = "../embeddenator-vsa", version = ">=0.20.1, <1.0.0" }
+embeddenator-vsa = { path = "../embeddenator-vsa", version = ">=0.21.0, <1.0.0" }
 embeddenator-retrieval = { path = "../embeddenator-retrieval", version = ">=0.20.0, <1.0.0" }
 embeddenator-io = { path = "../embeddenator-io", version = ">=0.20.0, <1.0.0", features = ["compression-zstd", "compression-lz4"] }
 

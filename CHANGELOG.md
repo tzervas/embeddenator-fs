@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.23.0] - 2026-01-25
+
+### Added
+- **Hybrid Journaling System**: Crash-safe write operations
+  - `RecordHeader` with 32-byte format including CRC32 checksums
+  - `JournalOp` enum for WriteChunk, DeleteChunk, WriteFile operations
+  - Three durability modes: Immediate, GroupCommit, Relaxed
+  - Background flush thread for group commit mode
+  - Transaction replay and checkpoint functionality
+- **VSA Validation Framework** (25 tests across 7 sections):
+  - Byte-perfect reconstruction, SHA256 verification, size validation
+  - VSA algebraic properties (bundle, bind, permutation)
+  - Filesystem CRUD, concurrent reads, version conflicts
+  - Memory system content-addressable retrieval
+  - Computational paradigm (superposition, sequence encoding)
+  - Integration tests with compression profiles
+  - Stress tests (100 files, 50 updates)
+
+### Changed
+- Requires embeddenator-vsa >= 0.21.0
+
+### Fixed
+- Clippy warnings: truncate(false) for journal file, io::Error::other usage
+
 ## [0.22.0] - 2026-01-25
 
 ### Added
