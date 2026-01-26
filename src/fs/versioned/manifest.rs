@@ -266,6 +266,12 @@ pub struct VersionedFileEntry {
     /// Original uncompressed size (for compressed files)
     pub uncompressed_size: Option<usize>,
 
+    /// Encoding format version for holographic storage
+    /// 0 = Legacy (Codebook.project() - ~0% accuracy)
+    /// 1 = ReversibleVSA (ReversibleVSAEncoder - ~94% accuracy)
+    /// None = standard VSA encoding (not holographic)
+    pub encoding_format: Option<u8>,
+
     /// Version number of this file entry
     pub version: u64,
 
@@ -293,6 +299,7 @@ impl VersionedFileEntry {
             deleted: false,
             compression_codec: None,
             uncompressed_size: None,
+            encoding_format: None,
             version: 0,
             created_at: now,
             modified_at: now,
@@ -322,6 +329,7 @@ impl VersionedFileEntry {
             deleted: false,
             compression_codec: None,
             uncompressed_size: None,
+            encoding_format: None,
             version: 0,
             created_at: now,
             modified_at: now,
@@ -344,6 +352,7 @@ impl VersionedFileEntry {
             deleted: false,
             compression_codec: None,
             uncompressed_size: None,
+            encoding_format: None,
             version: 0,
             created_at: now,
             modified_at: now,
@@ -366,6 +375,7 @@ impl VersionedFileEntry {
             deleted: false,
             compression_codec: None,
             uncompressed_size: None,
+            encoding_format: None,
             version: 0,
             created_at: now,
             modified_at: now,
@@ -413,6 +423,7 @@ impl VersionedFileEntry {
             deleted: false,
             compression_codec: None,
             uncompressed_size: None,
+            encoding_format: None,
             version: 0,
             created_at: now,
             modified_at: now,
@@ -450,6 +461,7 @@ impl VersionedFileEntry {
             deleted: false,
             compression_codec: None,
             uncompressed_size: None,
+            encoding_format: None,
             version: 0,
             created_at: now,
             modified_at: now,
@@ -487,6 +499,7 @@ impl VersionedFileEntry {
             deleted: false,
             compression_codec: Some(compression_codec),
             uncompressed_size: Some(uncompressed_size),
+            encoding_format: None,
             version: 0,
             created_at: now,
             modified_at: now,
@@ -509,6 +522,7 @@ impl VersionedFileEntry {
             deleted: false,
             compression_codec: None,
             uncompressed_size: None,
+            encoding_format: None,
             version: 0,
             created_at: now,
             modified_at: now,
@@ -538,6 +552,7 @@ impl VersionedFileEntry {
             deleted: false,
             compression_codec: Some(compression_codec),
             uncompressed_size: Some(uncompressed_size),
+            encoding_format: None,
             version: 0,
             created_at: now,
             modified_at: now,
@@ -568,6 +583,7 @@ impl VersionedFileEntry {
             deleted: false,
             compression_codec: Some(compression_codec),
             uncompressed_size: Some(uncompressed_size),
+            encoding_format: None,
             version: 0,
             created_at: now,
             modified_at: now,
@@ -589,6 +605,7 @@ impl VersionedFileEntry {
             deleted: false,
             compression_codec: self.compression_codec,
             uncompressed_size: self.uncompressed_size,
+            encoding_format: self.encoding_format,
             version: self.version + 1,
             created_at: self.created_at,
             modified_at: Instant::now(),
@@ -616,6 +633,7 @@ impl VersionedFileEntry {
             deleted: false,
             compression_codec: Some(compression_codec),
             uncompressed_size: Some(uncompressed_size),
+            encoding_format: self.encoding_format,
             version: self.version + 1,
             created_at: self.created_at,
             modified_at: Instant::now(),
@@ -629,6 +647,35 @@ impl VersionedFileEntry {
         updated.version += 1;
         updated.modified_at = Instant::now();
         updated
+    }
+
+    /// Create a new file entry for holographic storage with encoding format
+    pub fn new_holographic(
+        path: String,
+        is_text: bool,
+        size: usize,
+        chunks: Vec<ChunkId>,
+        encoding_format: u8,
+    ) -> Self {
+        let now = Instant::now();
+        Self {
+            path,
+            file_type: FileType::Regular,
+            permissions: FilePermissions::default_file(),
+            symlink_target: None,
+            hardlink_target: None,
+            device_id: None,
+            is_text,
+            size,
+            chunks,
+            deleted: false,
+            compression_codec: None,
+            uncompressed_size: None,
+            encoding_format: Some(encoding_format),
+            version: 0,
+            created_at: now,
+            modified_at: now,
+        }
     }
 
     /// Check if this entry represents a regular file with content

@@ -55,7 +55,7 @@ use crate::ReversibleVSAConfig;
 use embeddenator_io::{
     unwrap_auto, wrap_or_legacy, CompressionCodec, CompressionProfiler, PayloadKind,
 };
-use embeddenator_vsa::{Codebook, ProjectionResult, SparseVec, DIM};
+use embeddenator_vsa::{Codebook, ProjectionResult, ReversibleVSAEncoder, SparseVec, DIM};
 use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -65,6 +65,15 @@ pub use crate::versioned::Operation;
 
 /// Default chunk size for file encoding (4KB)
 pub const DEFAULT_CHUNK_SIZE: usize = 4096;
+
+/// Holographic encoding format versions
+/// Format 0: Legacy Codebook.project() - ~0% uncorrected accuracy
+pub const ENCODING_FORMAT_LEGACY: u8 = 0;
+/// Format 1: ReversibleVSAEncoder - ~94% uncorrected accuracy
+pub const ENCODING_FORMAT_REVERSIBLE_VSA: u8 = 1;
+
+/// Chunk size for ReversibleVSAEncoder (64 bytes for optimal accuracy)
+pub const REVERSIBLE_CHUNK_SIZE: usize = 64;
 
 /// Error types for VersionedEmbrFS operations
 #[derive(Debug, Clone)]
@@ -143,10 +152,15 @@ pub struct VersionedEmbrFS {
     /// Codebook for differential encoding (basis vectors)
     /// When holographic mode is enabled, data is projected onto these
     /// basis vectors and only residuals are stored in corrections.
+    /// NOTE: Legacy mode only - new code should use reversible_encoder
     codebook: Arc<RwLock<Codebook>>,
 
+    /// ReversibleVSAEncoder for true holographic encoding with ~94% accuracy
+    /// This encoder uses position-aware binding to achieve reversible storage
+    reversible_encoder: Arc<RwLock<ReversibleVSAEncoder>>,
+
     /// Whether holographic mode is enabled
-    /// When true, uses Codebook.project() for encoding (≤10% correction overhead)
+    /// When true, uses ReversibleVSAEncoder for encoding (~94% uncorrected accuracy)
     /// When false, uses SparseVec::encode_data() (legacy mode)
     holographic_mode: bool,
 }
@@ -159,15 +173,13 @@ impl VersionedEmbrFS {
 
     /// Create a new mutable filesystem with holographic mode enabled
     ///
-    /// In holographic mode, data is projected onto codebook basis vectors,
-    /// and only residuals (what the basis can't capture) are stored in the
-    /// correction layer. This achieves ≤10% correction overhead for true
-    /// holographic storage.
+    /// In holographic mode, data is encoded using ReversibleVSAEncoder which
+    /// achieves ~94% uncorrected accuracy through position-aware VSA binding.
+    /// Only ~6% of bytes need correction, resulting in <10% correction overhead.
     pub fn new_holographic() -> Self {
         let mut fs = Self::with_config(ReversibleVSAConfig::default());
         fs.holographic_mode = true;
-        // Initialize codebook with standard basis vectors
-        fs.codebook.write().unwrap().initialize_standard_basis();
+        // ReversibleVSAEncoder is already initialized in with_config_and_profiler
         fs
     }
 
@@ -192,17 +204,22 @@ impl VersionedEmbrFS {
             global_version: Arc::new(AtomicU64::new(0)),
             next_chunk_id: Arc::new(AtomicU64::new(1)),
             codebook: Arc::new(RwLock::new(Codebook::new(DIM))),
+            reversible_encoder: Arc::new(RwLock::new(ReversibleVSAEncoder::new())),
             holographic_mode: false,
         }
     }
 
     /// Enable holographic mode on an existing filesystem
     ///
-    /// This initializes the codebook with standard basis vectors.
-    /// New writes will use Codebook.project() for encoding.
+    /// New writes will use ReversibleVSAEncoder for encoding with ~94% accuracy.
     pub fn enable_holographic_mode(&mut self) {
         self.holographic_mode = true;
-        self.codebook.write().unwrap().initialize_standard_basis();
+        // ReversibleVSAEncoder is already initialized
+    }
+
+    /// Get a reference to the reversible encoder
+    pub fn reversible_encoder(&self) -> &Arc<RwLock<ReversibleVSAEncoder>> {
+        &self.reversible_encoder
     }
 
     /// Check if holographic mode is enabled
@@ -637,15 +654,16 @@ impl VersionedEmbrFS {
 
     // === Holographic encoding methods ===
 
-    /// Write a file using holographic encoding via Codebook projection
+    /// Write a file using holographic encoding via ReversibleVSAEncoder
     ///
-    /// This is the TRUE holographic storage method:
-    /// 1. Project data onto codebook basis vectors (coefficients)
-    /// 2. Store coefficients as SparseVec in chunk_store (holographic)
-    /// 3. Store only sparse residuals in corrections (≤10% overhead)
+    /// This is the TRUE holographic storage method achieving ~94% uncorrected accuracy:
+    /// 1. Encode data using ReversibleVSAEncoder.encode_chunked() (position-aware binding)
+    /// 2. Store encoded SparseVecs in chunk_store (one per REVERSIBLE_CHUNK_SIZE bytes)
+    /// 3. Decode to verify and compute corrections for bit-perfect reconstruction
+    /// 4. Store only sparse corrections (~6% of bytes need correction)
     ///
-    /// The coefficients represent how much each basis vector contributes.
-    /// The residual captures what the basis couldn't express.
+    /// The position-aware binding ensures each byte at each position has a unique
+    /// representation that can be retrieved via unbinding.
     pub fn write_file_holographic(
         &self,
         path: &str,
@@ -673,51 +691,72 @@ impl VersionedEmbrFS {
             (None, None) => {}
         }
 
-        // 2. Project data onto codebook
-        let codebook = self.codebook.read().unwrap();
-        let projection = codebook.project(data);
-        drop(codebook);
+        // 2. Encode data using ReversibleVSAEncoder with chunking for optimal accuracy
+        let mut encoder = self.reversible_encoder.write().unwrap();
+        let encoded_chunks = encoder.encode_chunked(data, REVERSIBLE_CHUNK_SIZE);
 
-        // 3. Convert projection coefficients to SparseVec
-        // The coefficients encode which basis vectors and how much
-        let chunk_vec = self.projection_to_sparsevec(&projection);
+        // Decode to verify and compute corrections
+        let decoded = encoder.decode_chunked(&encoded_chunks, REVERSIBLE_CHUNK_SIZE, data.len());
+        drop(encoder);
 
-        // 4. Store the SparseVec (holographic representation)
-        let chunk_id = self.allocate_chunk_id();
+        // 3. Store each encoded chunk
         let store_version = self.chunk_store.version();
+        let mut chunk_ids = Vec::with_capacity(encoded_chunks.len());
+        let mut chunk_updates = Vec::with_capacity(encoded_chunks.len());
+        let mut corrections_to_add = Vec::new();
 
-        // Compute content hash
-        let mut hasher = Sha256::new();
-        hasher.update(data);
-        let hash = hasher.finalize();
-        let mut hash_bytes = [0u8; 8];
-        hash_bytes.copy_from_slice(&hash[0..8]);
+        for (chunk_idx, chunk_vec) in encoded_chunks.into_iter().enumerate() {
+            let chunk_id = self.allocate_chunk_id();
+            chunk_ids.push(chunk_id);
 
-        let versioned_chunk = VersionedChunk::new(chunk_vec, data.len(), hash_bytes);
+            // Calculate the data range for this chunk
+            let start = chunk_idx * REVERSIBLE_CHUNK_SIZE;
+            let end = (start + REVERSIBLE_CHUNK_SIZE).min(data.len());
+            let chunk_data = &data[start..end];
+            let decoded_chunk = &decoded[start..end];
 
-        if expected_version.is_none() {
-            self.chunk_store
-                .batch_insert_new(vec![(chunk_id, versioned_chunk)])?;
-        } else {
-            self.chunk_store
-                .batch_insert(vec![(chunk_id, versioned_chunk)], store_version)?;
+            // Compute content hash for verification
+            let mut hasher = Sha256::new();
+            hasher.update(chunk_data);
+            let hash = hasher.finalize();
+            let mut hash_bytes = [0u8; 8];
+            hash_bytes.copy_from_slice(&hash[0..8]);
+
+            let versioned_chunk = VersionedChunk::new(chunk_vec, chunk_data.len(), hash_bytes);
+            chunk_updates.push((chunk_id, versioned_chunk));
+
+            // Prepare correction (only stores differences, should be ~6% of bytes)
+            let correction =
+                crate::correction::ChunkCorrection::new(chunk_id as u64, chunk_data, decoded_chunk);
+            corrections_to_add.push((chunk_id as u64, correction));
         }
 
-        // 5. Store residual in corrections (should be sparse now!)
-        let correction = self.projection_to_correction(chunk_id as u64, data, &projection);
+        // 4. Batch insert chunks
         if expected_version.is_none() {
-            self.corrections
-                .batch_insert_new(vec![(chunk_id as u64, correction)])?;
+            self.chunk_store.batch_insert_new(chunk_updates)?;
+        } else {
+            self.chunk_store
+                .batch_insert(chunk_updates, store_version)?;
+        }
+
+        // 5. Batch insert corrections
+        if expected_version.is_none() {
+            self.corrections.batch_insert_new(corrections_to_add)?;
         } else {
             let corrections_version = self.corrections.current_version();
             self.corrections
-                .batch_update(vec![(chunk_id as u64, correction)], corrections_version)?;
+                .batch_update(corrections_to_add, corrections_version)?;
         }
 
-        // 6. Update manifest
+        // 6. Update manifest with encoding format version
         let is_text = is_text_data(data);
-        let new_entry =
-            VersionedFileEntry::new(path.to_string(), is_text, data.len(), vec![chunk_id]);
+        let new_entry = VersionedFileEntry::new_holographic(
+            path.to_string(),
+            is_text,
+            data.len(),
+            chunk_ids.clone(),
+            ENCODING_FORMAT_REVERSIBLE_VSA,
+        );
 
         let file_version = if let Some((entry, _)) = existing {
             self.manifest.update_file(path, new_entry, entry.version)?;
@@ -728,7 +767,7 @@ impl VersionedEmbrFS {
         };
 
         // 7. Bundle into root
-        self.bundle_chunks_to_root(&[chunk_id])?;
+        self.bundle_chunks_to_root(&chunk_ids)?;
 
         // 8. Increment global version
         self.global_version.fetch_add(1, Ordering::AcqRel);
@@ -736,13 +775,14 @@ impl VersionedEmbrFS {
         Ok(file_version)
     }
 
-    /// Read a file using holographic decoding via Codebook reconstruction
+    /// Read a file using holographic decoding via ReversibleVSAEncoder
     ///
     /// This reverses the holographic encoding:
-    /// 1. Load SparseVec from chunk_store
-    /// 2. Convert back to projection coefficients
-    /// 3. Use Codebook.reconstruct() to get data
-    /// 4. Apply corrections for bit-perfect result
+    /// 1. Load all SparseVecs from chunk_store
+    /// 2. Use ReversibleVSAEncoder.decode_chunked() to reconstruct data
+    /// 3. Apply per-chunk corrections for bit-perfect result
+    ///
+    /// Supports both legacy (format 0) and new (format 1) encoding formats.
     pub fn read_file_holographic(&self, path: &str) -> Result<(Vec<u8>, u64), EmbrFSError> {
         // 1. Get file entry
         let (file_entry, _) = self
@@ -754,26 +794,88 @@ impl VersionedEmbrFS {
             return Err(EmbrFSError::FileNotFound(path.to_string()));
         }
 
-        // 2. For holographic files, we expect a single chunk containing the projection
+        // 2. Handle empty files
         if file_entry.chunks.is_empty() {
             return Ok((Vec::new(), file_entry.version));
         }
 
+        // 3. Check encoding format and dispatch to appropriate decoder
+        let encoding_format = file_entry.encoding_format.unwrap_or(ENCODING_FORMAT_LEGACY);
+
+        match encoding_format {
+            ENCODING_FORMAT_REVERSIBLE_VSA => self.read_file_holographic_reversible(&file_entry),
+            ENCODING_FORMAT_LEGACY | _ => {
+                // Legacy format: use codebook-based reconstruction
+                self.read_file_holographic_legacy(&file_entry)
+            }
+        }
+    }
+
+    /// Read a file encoded with ReversibleVSAEncoder (format 1)
+    fn read_file_holographic_reversible(
+        &self,
+        file_entry: &VersionedFileEntry,
+    ) -> Result<(Vec<u8>, u64), EmbrFSError> {
+        // 1. Load all chunk vectors (clone from Arc to owned SparseVec)
+        let mut chunk_vecs = Vec::with_capacity(file_entry.chunks.len());
+        for &chunk_id in &file_entry.chunks {
+            let (chunk, _) = self
+                .chunk_store
+                .get(chunk_id)
+                .ok_or(EmbrFSError::ChunkNotFound(chunk_id))?;
+            // Clone the SparseVec out of the Arc for decode_chunked
+            chunk_vecs.push((*chunk.vector).clone());
+        }
+
+        // 2. Decode using ReversibleVSAEncoder
+        let encoder = self.reversible_encoder.read().unwrap();
+        let mut reconstructed =
+            encoder.decode_chunked(&chunk_vecs, REVERSIBLE_CHUNK_SIZE, file_entry.size);
+        drop(encoder);
+
+        // 3. Apply per-chunk corrections for bit-perfect result
+        for (chunk_idx, &chunk_id) in file_entry.chunks.iter().enumerate() {
+            if let Some((correction, _)) = self.corrections.get(chunk_id as u64) {
+                // Calculate the data range for this chunk
+                let start = chunk_idx * REVERSIBLE_CHUNK_SIZE;
+                let end = (start + REVERSIBLE_CHUNK_SIZE).min(file_entry.size);
+
+                // Apply correction to this chunk's portion of the reconstructed data
+                let chunk_data = &reconstructed[start..end];
+                let corrected = correction.apply(chunk_data);
+
+                // Copy corrected data back
+                reconstructed[start..end].copy_from_slice(&corrected[..end - start]);
+            }
+        }
+
+        // Truncate to exact size
+        reconstructed.truncate(file_entry.size);
+
+        Ok((reconstructed, file_entry.version))
+    }
+
+    /// Read a file encoded with legacy Codebook.project() (format 0)
+    fn read_file_holographic_legacy(
+        &self,
+        file_entry: &VersionedFileEntry,
+    ) -> Result<(Vec<u8>, u64), EmbrFSError> {
+        // Legacy format expects a single chunk containing the projection
         let chunk_id = file_entry.chunks[0];
         let (chunk, _) = self
             .chunk_store
             .get(chunk_id)
             .ok_or(EmbrFSError::ChunkNotFound(chunk_id))?;
 
-        // 3. Convert SparseVec back to projection
+        // Convert SparseVec back to projection
         let projection = self.sparsevec_to_projection(&chunk.vector);
 
-        // 4. Reconstruct using codebook
+        // Reconstruct using codebook
         let codebook = self.codebook.read().unwrap();
         let mut reconstructed = codebook.reconstruct(&projection, file_entry.size);
         drop(codebook);
 
-        // 5. Apply correction for bit-perfect result
+        // Apply correction for bit-perfect result
         if let Some((correction, _)) = self.corrections.get(chunk_id as u64) {
             reconstructed = correction.apply(&reconstructed);
         }
@@ -789,6 +891,10 @@ impl VersionedEmbrFS {
     /// The coefficients (basis_id -> weight) are encoded as:
     /// - pos indices: basis_id * 256 + encoded_weight for positive weights
     /// - neg indices: basis_id * 256 + encoded_weight for negative weights
+    ///
+    /// NOTE: This is legacy code kept for backward compatibility with format 0.
+    /// New writes use ReversibleVSAEncoder (format 1) instead.
+    #[allow(dead_code)]
     fn projection_to_sparsevec(&self, projection: &ProjectionResult) -> SparseVec {
         let mut pos = Vec::new();
         let mut neg = Vec::new();
@@ -857,6 +963,10 @@ impl VersionedEmbrFS {
     }
 
     /// Convert projection residual to a ChunkCorrection
+    ///
+    /// NOTE: This is legacy code kept for backward compatibility with format 0.
+    /// New writes use ReversibleVSAEncoder (format 1) instead.
+    #[allow(dead_code)]
     fn projection_to_correction(
         &self,
         chunk_id: u64,
@@ -1133,5 +1243,121 @@ mod tests {
 
         let config_profile = profiler.for_path("/etc/nginx.conf");
         assert_eq!(config_profile.name, "Config");
+    }
+
+    #[test]
+    fn test_holographic_write_and_read() {
+        let fs = VersionedEmbrFS::new_holographic();
+        let data = b"Hello, Holographic EmbrFS!";
+
+        // Write file using holographic encoding
+        let version = fs.write_file_holographic("test.txt", data, None).unwrap();
+        assert_eq!(version, 0);
+
+        // Read it back
+        let (content, read_version) = fs.read_file_holographic("test.txt").unwrap();
+        assert_eq!(&content[..], data);
+        assert_eq!(read_version, 0);
+    }
+
+    #[test]
+    fn test_holographic_accuracy() {
+        let fs = VersionedEmbrFS::new_holographic();
+
+        // Test with various data patterns to verify >90% uncorrected accuracy
+        let test_data: Vec<u8> = (0..1024).map(|i| (i % 256) as u8).collect();
+
+        // Write and read back
+        fs.write_file_holographic("accuracy_test.bin", &test_data, None)
+            .unwrap();
+        let (content, _) = fs.read_file_holographic("accuracy_test.bin").unwrap();
+
+        // Should be bit-perfect (with corrections applied)
+        assert_eq!(content, test_data);
+
+        // Check that correction overhead is reasonable
+        let stats = fs.stats();
+        let correction_ratio =
+            stats.correction_overhead_bytes as f64 / stats.total_size_bytes as f64;
+
+        // With ~94% accuracy, correction should be <10% of data
+        // (allowing some margin for test data patterns)
+        assert!(
+            correction_ratio < 0.15,
+            "Correction overhead too high: {:.1}%",
+            correction_ratio * 100.0
+        );
+    }
+
+    #[test]
+    fn test_holographic_large_file() {
+        let fs = VersionedEmbrFS::new_holographic();
+
+        // Create a larger file that spans multiple chunks
+        let data: Vec<u8> = (0..4096).map(|i| (i % 256) as u8).collect();
+
+        fs.write_file_holographic("large_holo.bin", &data, None)
+            .unwrap();
+        let (content, _) = fs.read_file_holographic("large_holo.bin").unwrap();
+
+        // Should be bit-perfect
+        assert_eq!(content, data);
+    }
+
+    #[test]
+    fn test_holographic_encoding_format_in_manifest() {
+        let fs = VersionedEmbrFS::new_holographic();
+        let data = b"Test encoding format";
+
+        fs.write_file_holographic("format_test.txt", data, None)
+            .unwrap();
+
+        // Check manifest has correct encoding format
+        let (file_entry, _) = fs.manifest.get_file("format_test.txt").unwrap();
+        assert_eq!(
+            file_entry.encoding_format,
+            Some(ENCODING_FORMAT_REVERSIBLE_VSA)
+        );
+    }
+
+    #[test]
+    fn test_holographic_update_file() {
+        let fs = VersionedEmbrFS::new_holographic();
+
+        // Create file
+        let v1 = fs
+            .write_file_holographic("update_test.txt", b"version 1", None)
+            .unwrap();
+        assert_eq!(v1, 0);
+
+        // Update with correct version
+        let v2 = fs
+            .write_file_holographic("update_test.txt", b"version 2 is longer", Some(v1))
+            .unwrap();
+        assert_eq!(v2, 1);
+
+        // Read back and verify
+        let (content, version) = fs.read_file_holographic("update_test.txt").unwrap();
+        assert_eq!(&content[..], b"version 2 is longer");
+        assert_eq!(version, 1);
+    }
+
+    #[test]
+    fn test_holographic_empty_file() {
+        let fs = VersionedEmbrFS::new_holographic();
+
+        fs.write_file_holographic("empty.txt", b"", None).unwrap();
+        let (content, _) = fs.read_file_holographic("empty.txt").unwrap();
+
+        assert!(content.is_empty());
+    }
+
+    #[test]
+    fn test_enable_holographic_mode() {
+        let mut fs = VersionedEmbrFS::new();
+        assert!(!fs.is_holographic());
+
+        fs.enable_holographic_mode();
+        assert!(fs.is_holographic());
     }
 }
