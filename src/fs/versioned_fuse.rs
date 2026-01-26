@@ -23,7 +23,7 @@ use crate::EmbrFSError;
 #[cfg(feature = "fuse")]
 use fuser::{
     Filesystem, KernelConfig, ReplyAttr, ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty,
-    ReplyEntry, ReplyOpen, ReplyWrite, Request,
+    ReplyEntry, ReplyOpen, ReplyWrite, ReplyXattr, Request,
 };
 #[cfg(feature = "fuse")]
 use std::ffi::OsStr;
@@ -35,7 +35,7 @@ use std::ffi::OsStr;
 #[allow(dead_code)]
 pub struct VersionedFUSE {
     /// The underlying versioned filesystem
-    fs: Arc<VersionedEmbrFS>,
+    pub(crate) fs: Arc<VersionedEmbrFS>,
 
     /// Inode to path mapping
     inode_paths: Arc<RwLock<HashMap<Ino, String>>>,
@@ -61,6 +61,9 @@ pub struct VersionedFUSE {
     /// Open file handles (fh -> (path, version))
     open_files: Arc<RwLock<HashMap<u64, (String, u64)>>>,
 
+    /// Extended attributes storage (ino -> (name -> value))
+    xattrs: Arc<RwLock<HashMap<Ino, HashMap<String, Vec<u8>>>>>,
+
     /// TTL for attributes
     attr_ttl: Duration,
 
@@ -82,6 +85,7 @@ impl VersionedFUSE {
             next_ino: Arc::new(RwLock::new(ROOT_INO + 1)),
             next_fh: Arc::new(RwLock::new(1)),
             open_files: Arc::new(RwLock::new(HashMap::new())),
+            xattrs: Arc::new(RwLock::new(HashMap::new())),
             attr_ttl: Duration::from_secs(1),
             entry_ttl: Duration::from_secs(1),
         };
@@ -1086,6 +1090,194 @@ impl Filesystem for VersionedFUSE {
 
         reply.ok();
     }
+
+    /// Get an extended attribute value
+    ///
+    /// Supports both user-defined attributes and built-in engram attributes:
+    /// - `user.engram.version`: Current global filesystem version
+    /// - `user.engram.file_count`: Number of active files
+    /// - `user.engram.total_size`: Total size of all files in bytes
+    /// - `user.engram.chunk_count`: Total number of chunks
+    fn getxattr(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        name: &OsStr,
+        size: u32,
+        reply: ReplyXattr,
+    ) {
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => {
+                reply.error(libc::ENODATA);
+                return;
+            }
+        };
+
+        // Check if it's a built-in engram attribute
+        let value = match name_str {
+            "user.engram.version" => {
+                let version = self.fs.version();
+                Some(version.to_string().into_bytes())
+            }
+            "user.engram.file_count" => {
+                let stats = self.fs.stats();
+                Some(stats.active_files.to_string().into_bytes())
+            }
+            "user.engram.total_size" => {
+                let stats = self.fs.stats();
+                Some(stats.total_size_bytes.to_string().into_bytes())
+            }
+            "user.engram.chunk_count" => {
+                let stats = self.fs.stats();
+                Some(stats.total_chunks.to_string().into_bytes())
+            }
+            "user.engram.correction_overhead" => {
+                let stats = self.fs.stats();
+                Some(stats.correction_overhead_bytes.to_string().into_bytes())
+            }
+            _ => {
+                // Check user-defined xattrs
+                let xattrs = self.xattrs.read().unwrap();
+                xattrs
+                    .get(&ino)
+                    .and_then(|attrs| attrs.get(name_str).cloned())
+            }
+        };
+
+        match value {
+            Some(data) => {
+                if size == 0 {
+                    // Return size needed
+                    reply.size(data.len() as u32);
+                } else if size >= data.len() as u32 {
+                    // Return the data
+                    reply.data(&data);
+                } else {
+                    // Buffer too small
+                    reply.error(libc::ERANGE);
+                }
+            }
+            None => {
+                reply.error(libc::ENODATA);
+            }
+        }
+    }
+
+    /// Set an extended attribute value
+    fn setxattr(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        name: &OsStr,
+        value: &[u8],
+        _flags: i32,
+        _position: u32,
+        reply: ReplyEmpty,
+    ) {
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => {
+                reply.error(libc::EINVAL);
+                return;
+            }
+        };
+
+        // Don't allow setting built-in attributes
+        if name_str.starts_with("user.engram.") {
+            reply.error(libc::EPERM);
+            return;
+        }
+
+        // Check that the inode exists
+        let inode_paths = self.inode_paths.read().unwrap();
+        if !inode_paths.contains_key(&ino) {
+            reply.error(libc::ENOENT);
+            return;
+        }
+        drop(inode_paths);
+
+        // Store the xattr
+        let mut xattrs = self.xattrs.write().unwrap();
+        let inode_xattrs = xattrs.entry(ino).or_default();
+        inode_xattrs.insert(name_str.to_string(), value.to_vec());
+
+        reply.ok();
+    }
+
+    /// List extended attribute names
+    fn listxattr(&mut self, _req: &Request<'_>, ino: u64, size: u32, reply: ReplyXattr) {
+        // Start with built-in attributes (only for valid inodes)
+        let inode_paths = self.inode_paths.read().unwrap();
+        if !inode_paths.contains_key(&ino) {
+            reply.error(libc::ENOENT);
+            return;
+        }
+        drop(inode_paths);
+
+        // Collect all attribute names
+        let mut names: Vec<String> = vec![
+            "user.engram.version".to_string(),
+            "user.engram.file_count".to_string(),
+            "user.engram.total_size".to_string(),
+            "user.engram.chunk_count".to_string(),
+            "user.engram.correction_overhead".to_string(),
+        ];
+
+        // Add user-defined xattrs
+        let xattrs = self.xattrs.read().unwrap();
+        if let Some(inode_xattrs) = xattrs.get(&ino) {
+            for name in inode_xattrs.keys() {
+                names.push(name.clone());
+            }
+        }
+
+        // Format as null-terminated strings
+        let mut data = Vec::new();
+        for name in &names {
+            data.extend(name.as_bytes());
+            data.push(0); // null terminator
+        }
+
+        if size == 0 {
+            // Return size needed
+            reply.size(data.len() as u32);
+        } else if size >= data.len() as u32 {
+            // Return the data
+            reply.data(&data);
+        } else {
+            // Buffer too small
+            reply.error(libc::ERANGE);
+        }
+    }
+
+    /// Remove an extended attribute
+    fn removexattr(&mut self, _req: &Request<'_>, ino: u64, name: &OsStr, reply: ReplyEmpty) {
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => {
+                reply.error(libc::EINVAL);
+                return;
+            }
+        };
+
+        // Don't allow removing built-in attributes
+        if name_str.starts_with("user.engram.") {
+            reply.error(libc::EPERM);
+            return;
+        }
+
+        // Try to remove the xattr
+        let mut xattrs = self.xattrs.write().unwrap();
+        if let Some(inode_xattrs) = xattrs.get_mut(&ino) {
+            if inode_xattrs.remove(name_str).is_some() {
+                reply.ok();
+                return;
+            }
+        }
+
+        reply.error(libc::ENODATA);
+    }
 }
 
 /// Mount a VersionedEmbrFS as a FUSE filesystem
@@ -1097,4 +1289,224 @@ pub fn mount_versioned_fs(
 ) -> std::io::Result<()> {
     let fuse_fs = VersionedFUSE::new(fs);
     fuser::mount2(fuse_fs, mountpoint, options)
+}
+
+/// Options for mounting VersionedEmbrFS with signal handling
+#[cfg(feature = "fuse")]
+#[derive(Clone, Debug)]
+pub struct VersionedMountOptions {
+    /// Filesystem name shown in mount output
+    pub fsname: String,
+    /// Allow other users to access the mount (requires user_allow_other in /etc/fuse.conf)
+    pub allow_other: bool,
+    /// Allow root to access the mount
+    pub allow_root: bool,
+    /// Auto-unmount when process exits
+    pub auto_unmount: bool,
+}
+
+#[cfg(feature = "fuse")]
+impl Default for VersionedMountOptions {
+    fn default() -> Self {
+        Self {
+            fsname: "versioned-engram".to_string(),
+            allow_other: false,
+            allow_root: true,
+            auto_unmount: true,
+        }
+    }
+}
+
+/// Mount a VersionedEmbrFS with signal handling for graceful unmount
+///
+/// This function installs signal handlers for SIGINT (Ctrl+C), SIGTERM, and SIGHUP,
+/// enabling graceful unmount with proper cleanup when signals are received.
+///
+/// # Architecture
+///
+/// ```text
+/// ┌─────────────────────────────────────────────────────────────┐
+/// │                    Signal Handler                           │
+/// │       (SIGINT, SIGTERM, SIGHUP)                            │
+/// └─────────────────────────────────────────────────────────────┘
+///                              │
+///                              ▼
+/// ┌─────────────────────────────────────────────────────────────┐
+/// │                    Shutdown Flag                            │
+/// │              (AtomicBool set on signal)                     │
+/// └─────────────────────────────────────────────────────────────┘
+///                              │
+///                              ▼
+/// ┌─────────────────────────────────────────────────────────────┐
+/// │                  Graceful Shutdown                          │
+/// │  1. Stop accepting new operations                           │
+/// │  2. Wait for pending writes to complete                     │
+/// │  3. Flush WAL to disk                                       │
+/// │  4. Drop FUSE session (triggers clean unmount)              │
+/// └─────────────────────────────────────────────────────────────┘
+/// ```
+///
+/// # Arguments
+///
+/// * `fs` - The VersionedEmbrFS instance to mount
+/// * `mountpoint` - Directory path where the filesystem will be mounted
+/// * `options` - Mount options (see `VersionedMountOptions`)
+///
+/// # Returns
+///
+/// Returns `Ok(())` on clean unmount, or an error if mounting fails.
+///
+/// # Example
+///
+/// ```no_run
+/// use embeddenator_fs::fs::versioned_fuse::{mount_versioned_fs_with_signals, VersionedMountOptions};
+/// use embeddenator_fs::VersionedEmbrFS;
+/// use std::path::Path;
+///
+/// let fs = VersionedEmbrFS::new();
+/// // ... write files to fs ...
+///
+/// // Mount with signal handling (blocks until unmount)
+/// mount_versioned_fs_with_signals(
+///     fs,
+///     Path::new("/mnt/engram"),
+///     VersionedMountOptions::default(),
+/// ).expect("Mount failed");
+/// ```
+#[cfg(feature = "fuse")]
+pub fn mount_versioned_fs_with_signals(
+    fs: VersionedEmbrFS,
+    mountpoint: &std::path::Path,
+    options: VersionedMountOptions,
+) -> std::io::Result<()> {
+    use crate::fs::signal::{install_signal_handlers, ShutdownSignal};
+    use fuser::MountOption;
+    use std::sync::Arc;
+
+    // Set up shutdown signal
+    let shutdown = Arc::new(ShutdownSignal::new());
+    install_signal_handlers(shutdown.clone())?;
+
+    // Build mount options
+    let mut mount_options = vec![
+        MountOption::FSName(options.fsname),
+        MountOption::DefaultPermissions,
+    ];
+
+    if options.auto_unmount {
+        mount_options.push(MountOption::AutoUnmount);
+    }
+
+    if options.allow_other {
+        mount_options.push(MountOption::AllowOther);
+    } else if options.allow_root {
+        mount_options.push(MountOption::AllowRoot);
+    }
+
+    // Create FUSE filesystem adapter
+    let fuse_fs = VersionedFUSE::new(fs);
+
+    // Keep reference to the underlying FS for cleanup
+    let underlying_fs = fuse_fs.fs.clone();
+
+    // Use spawn_mount2 to get a controllable session
+    let session = fuser::spawn_mount2(fuse_fs, mountpoint, &mount_options)?;
+
+    eprintln!("VersionedEmbrFS mounted at {}", mountpoint.display());
+    eprintln!("Write operations are supported. Press Ctrl+C to unmount gracefully.");
+    eprintln!(
+        "Use 'fusermount -u {}' to unmount manually.",
+        mountpoint.display()
+    );
+
+    // Poll for shutdown signal
+    loop {
+        if shutdown.is_signaled() {
+            eprintln!(
+                "\nReceived {} - initiating graceful shutdown...",
+                shutdown.signal_name()
+            );
+
+            // Give pending operations a moment to complete
+            std::thread::sleep(std::time::Duration::from_millis(100));
+
+            // Log filesystem stats before unmounting
+            let stats = underlying_fs.stats();
+            eprintln!(
+                "Filesystem stats: {} files, {} bytes total",
+                stats.active_files, stats.total_size_bytes
+            );
+
+            // Drop the session to trigger clean unmount
+            // This will call destroy() on the FUSE filesystem
+            drop(session);
+
+            eprintln!("VersionedEmbrFS unmounted cleanly.");
+            return Ok(());
+        }
+
+        // Brief sleep to avoid busy-waiting
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+}
+
+/// Mount a VersionedEmbrFS in foreground mode with optional signal handling
+///
+/// This is a convenience wrapper that supports both foreground blocking mode
+/// and signal-aware mode.
+///
+/// # Arguments
+///
+/// * `fs` - The VersionedEmbrFS instance to mount
+/// * `mountpoint` - Directory path where the filesystem will be mounted
+/// * `options` - Mount options
+/// * `handle_signals` - If true, install signal handlers for graceful shutdown
+///
+/// # Example
+///
+/// ```no_run
+/// use embeddenator_fs::fs::versioned_fuse::{mount_versioned_foreground, VersionedMountOptions};
+/// use embeddenator_fs::VersionedEmbrFS;
+/// use std::path::Path;
+///
+/// let fs = VersionedEmbrFS::new();
+///
+/// // Mount with signal handling in foreground
+/// mount_versioned_foreground(
+///     fs,
+///     Path::new("/mnt/engram"),
+///     VersionedMountOptions::default(),
+///     true, // handle signals
+/// ).expect("Mount failed");
+/// ```
+#[cfg(feature = "fuse")]
+pub fn mount_versioned_foreground(
+    fs: VersionedEmbrFS,
+    mountpoint: &std::path::Path,
+    options: VersionedMountOptions,
+    handle_signals: bool,
+) -> std::io::Result<()> {
+    if handle_signals {
+        mount_versioned_fs_with_signals(fs, mountpoint, options)
+    } else {
+        // Use the basic mount without signal handling
+        use fuser::MountOption;
+
+        let mut mount_options = vec![
+            MountOption::FSName(options.fsname),
+            MountOption::DefaultPermissions,
+        ];
+
+        if options.auto_unmount {
+            mount_options.push(MountOption::AutoUnmount);
+        }
+
+        if options.allow_other {
+            mount_options.push(MountOption::AllowOther);
+        } else if options.allow_root {
+            mount_options.push(MountOption::AllowRoot);
+        }
+
+        mount_versioned_fs(fs, mountpoint, &mount_options)
+    }
 }

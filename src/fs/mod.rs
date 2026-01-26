@@ -2,6 +2,7 @@ pub mod correction;
 pub mod embrfs;
 pub mod fuse_shim;
 pub mod large_file;
+pub mod signal;
 pub mod streaming;
 pub mod versioned;
 pub mod versioned_embrfs;
@@ -21,4 +22,7 @@ pub use versioned_embrfs::{EmbrFSError, FilesystemStats, VersionedEmbrFS};
 pub use embeddenator_io::{CompressionCodec, CompressionProfile, CompressionProfiler};
 
 #[cfg(feature = "fuse")]
-pub use versioned_fuse::{mount_versioned_fs, VersionedFUSE};
+pub use versioned_fuse::{
+    mount_versioned_foreground, mount_versioned_fs, mount_versioned_fs_with_signals, VersionedFUSE,
+    VersionedMountOptions,
+};
