@@ -230,8 +230,55 @@ impl Qcow2Image {
     /// - Resolve the backing chain before encoding
     /// - Error out if backing file is missing
     pub async fn has_backing_file(&self) -> bool {
-        // TODO: Implement backing file detection
+        // Re-read header to check backing file fields
+        if let Ok(mut file) = tokio::fs::File::open(&self.path).await {
+            if let Ok(header) = Self::read_header(&mut file).await {
+                return header.backing_file_offset != 0 && header.backing_file_size > 0;
+            }
+        }
         false
+    }
+
+    /// Get backing file path if present
+    ///
+    /// Returns the path to the backing file, which may be relative to
+    /// the current image's directory or an absolute path.
+    pub async fn backing_file_path(&self) -> Option<String> {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
+        let mut file = tokio::fs::File::open(&self.path).await.ok()?;
+        let header = Self::read_header(&mut file).await.ok()?;
+
+        if header.backing_file_offset == 0 || header.backing_file_size == 0 {
+            return None;
+        }
+
+        // Seek to backing file name location
+        file.seek(std::io::SeekFrom::Start(header.backing_file_offset))
+            .await
+            .ok()?;
+
+        // Read backing file name
+        let mut backing_name = vec![0u8; header.backing_file_size as usize];
+        file.read_exact(&mut backing_name).await.ok()?;
+
+        String::from_utf8(backing_name).ok()
+    }
+
+    /// Resolve backing file to full path
+    ///
+    /// If the backing file path is relative, resolves it relative to
+    /// the current image's directory.
+    pub async fn resolve_backing_file(&self) -> Option<PathBuf> {
+        let backing_path = self.backing_file_path().await?;
+        let backing = PathBuf::from(&backing_path);
+
+        if backing.is_absolute() {
+            Some(backing)
+        } else {
+            // Resolve relative to image directory
+            self.path.parent().map(|dir| dir.join(&backing_path))
+        }
     }
 }
 
@@ -255,6 +302,8 @@ struct Qcow2Header {
 #[cfg(feature = "disk-image")]
 impl BlockDevice for Qcow2Image {
     async fn read_at(&self, buf: &mut [u8], offset: u64) -> DiskResult<usize> {
+        use tokio::io::{AsyncReadExt, AsyncSeekExt};
+
         if offset >= self.virtual_size {
             return Err(DiskError::OutOfBounds {
                 requested: offset,
@@ -266,11 +315,101 @@ impl BlockDevice for Qcow2Image {
         let available = (self.virtual_size - offset) as usize;
         let to_read = buf.len().min(available);
 
-        // TODO: Implement actual qcow2-rs read
-        // For now, return zeros (unallocated clusters read as zero)
-        buf[..to_read].fill(0);
+        // QCOW2 read implementation:
+        // 1. Calculate which cluster(s) the read spans
+        // 2. For each cluster:
+        //    a. Look up L1 entry to find L2 table
+        //    b. Look up L2 entry to find data cluster
+        //    c. If compressed, decompress
+        //    d. If unallocated, return zeros (or read from backing file)
 
-        Ok(to_read)
+        let cluster_size = self.cluster_size as u64;
+        let start_cluster = offset / cluster_size;
+        let end_cluster = (offset + to_read as u64 - 1) / cluster_size;
+
+        let mut file = tokio::fs::File::open(&self.path).await?;
+        let header = Self::read_header(&mut file).await?;
+
+        let mut bytes_read = 0;
+        let mut current_offset = offset;
+
+        for cluster_idx in start_cluster..=end_cluster {
+            // Calculate position within this cluster
+            let cluster_start_offset = cluster_idx * cluster_size;
+            let offset_in_cluster = current_offset - cluster_start_offset;
+            let remaining_in_cluster = (cluster_size - offset_in_cluster) as usize;
+            let bytes_to_read = remaining_in_cluster.min(to_read - bytes_read);
+
+            // Look up L1 table entry
+            let l1_index = cluster_idx / (cluster_size / 8);
+            let l1_entry_offset = header.l1_table_offset + l1_index * 8;
+
+            file.seek(std::io::SeekFrom::Start(l1_entry_offset)).await?;
+            let mut l1_buf = [0u8; 8];
+            file.read_exact(&mut l1_buf).await?;
+            let l1_entry = u64::from_be_bytes(l1_buf);
+
+            if l1_entry == 0 {
+                // Unallocated L2 table - return zeros or read from backing
+                if let Some(backing_path) = self.resolve_backing_file().await {
+                    // Read from backing file
+                    if let Ok(backing) = Qcow2Image::open(&backing_path).await {
+                        let backing_buf = &mut buf[bytes_read..bytes_read + bytes_to_read];
+                        backing.read_at(backing_buf, current_offset).await?;
+                    } else {
+                        buf[bytes_read..bytes_read + bytes_to_read].fill(0);
+                    }
+                } else {
+                    buf[bytes_read..bytes_read + bytes_to_read].fill(0);
+                }
+            } else {
+                // L2 table exists - look up data cluster
+                let l2_table_offset = l1_entry & 0x00ffffffffffff00;
+                let l2_index = (cluster_idx % (cluster_size / 8)) as u64;
+                let l2_entry_offset = l2_table_offset + l2_index * 8;
+
+                file.seek(std::io::SeekFrom::Start(l2_entry_offset)).await?;
+                let mut l2_buf = [0u8; 8];
+                file.read_exact(&mut l2_buf).await?;
+                let l2_entry = u64::from_be_bytes(l2_buf);
+
+                if l2_entry == 0 {
+                    // Unallocated cluster
+                    if let Some(backing_path) = self.resolve_backing_file().await {
+                        if let Ok(backing) = Qcow2Image::open(&backing_path).await {
+                            let backing_buf = &mut buf[bytes_read..bytes_read + bytes_to_read];
+                            backing.read_at(backing_buf, current_offset).await?;
+                        } else {
+                            buf[bytes_read..bytes_read + bytes_to_read].fill(0);
+                        }
+                    } else {
+                        buf[bytes_read..bytes_read + bytes_to_read].fill(0);
+                    }
+                } else {
+                    // Check if compressed (bit 62)
+                    let compressed = (l2_entry >> 62) & 1 == 1;
+
+                    if compressed {
+                        // Compressed cluster - would need zlib decompression
+                        // For now, return error indicating compression not supported
+                        return Err(DiskError::Unsupported {
+                            feature: "QCOW2 compressed clusters".to_string(),
+                        });
+                    }
+
+                    // Standard cluster - read directly
+                    let data_offset = (l2_entry & 0x00ffffffffffff00) + offset_in_cluster;
+                    file.seek(std::io::SeekFrom::Start(data_offset)).await?;
+                    file.read_exact(&mut buf[bytes_read..bytes_read + bytes_to_read])
+                        .await?;
+                }
+            }
+
+            bytes_read += bytes_to_read;
+            current_offset += bytes_to_read as u64;
+        }
+
+        Ok(bytes_read)
     }
 
     fn size(&self) -> u64 {

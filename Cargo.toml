@@ -13,11 +13,13 @@ categories = ["filesystem"]
 [features]
 default = []
 fuse = ["fuser"]
+# Async streaming support (tokio runtime only, no disk image dependencies)
+async-streaming = ["tokio"]
 # Disk image support for VM encoding (QCOW2, raw images, partition tables)
 # Requires tokio runtime and optional io_uring for maximum performance on Linux
-disk-image = ["qcow2-rs", "gpt", "mbrman", "ext4", "tokio", "tokio-uring"]
+disk-image = ["qcow2-rs", "gpt", "mbrman", "ext4", "positioned-io2", "tokio", "tokio-uring"]
 # Disk image support without io_uring (for non-Linux or older kernels)
-disk-image-portable = ["qcow2-rs", "gpt", "mbrman", "ext4", "tokio"]
+disk-image-portable = ["qcow2-rs", "gpt", "mbrman", "ext4", "positioned-io2", "tokio"]
 
 [dependencies]
 # FUSE optional feature
@@ -52,6 +54,11 @@ mbrman = { version = "0.6", optional = true }
 #   - Why: Most common Linux filesystem; needed to traverse VM disk contents
 #   - Read-only is sufficient for encoding (we don't modify source images)
 ext4 = { version = "0.9", optional = true }
+
+# positioned-io2: Positioned I/O traits for the ext4 crate
+#   - Why: ext4 crate requires ReadAt trait for random access to disk images
+#   - Re-exported from ext4, but needed explicitly for PartitionReader impl
+positioned-io2 = { version = "0.3", optional = true }
 
 # Async runtime (required for disk-image features)
 # tokio: Industry-standard async runtime for Rust

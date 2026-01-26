@@ -46,6 +46,9 @@ pub struct VersionedFUSE {
     /// Directory structure (parent_ino -> child entries)
     directories: Arc<RwLock<HashMap<Ino, Vec<DirEntry>>>>,
 
+    /// Parent inode mapping (child_ino -> parent_ino)
+    parent_inodes: Arc<RwLock<HashMap<Ino, Ino>>>,
+
     /// Symlink targets (ino -> target)
     symlinks: Arc<RwLock<HashMap<Ino, String>>>,
 
@@ -74,6 +77,7 @@ impl VersionedFUSE {
             inode_paths: Arc::new(RwLock::new(HashMap::new())),
             path_inodes: Arc::new(RwLock::new(HashMap::new())),
             directories: Arc::new(RwLock::new(HashMap::new())),
+            parent_inodes: Arc::new(RwLock::new(HashMap::new())),
             symlinks: Arc::new(RwLock::new(HashMap::new())),
             next_ino: Arc::new(RwLock::new(ROOT_INO + 1)),
             next_fh: Arc::new(RwLock::new(1)),
@@ -96,10 +100,12 @@ impl VersionedFUSE {
         let mut inode_paths = self.inode_paths.write().unwrap();
         let mut path_inodes = self.path_inodes.write().unwrap();
         let mut directories = self.directories.write().unwrap();
+        let mut parent_inodes = self.parent_inodes.write().unwrap();
 
         inode_paths.insert(ROOT_INO, "/".to_string());
         path_inodes.insert("/".to_string(), ROOT_INO);
         directories.insert(ROOT_INO, Vec::new());
+        parent_inodes.insert(ROOT_INO, ROOT_INO); // Root is its own parent
     }
 
     /// Rebuild the directory structure from filesystem contents
@@ -139,6 +145,11 @@ impl VersionedFUSE {
                 self.get_or_create_inode(&parent_path)
             };
 
+            // Track parent inode
+            let mut parent_map = self.parent_inodes.write().unwrap();
+            parent_map.insert(ino, parent_ino);
+            drop(parent_map);
+
             let mut directories = self.directories.write().unwrap();
             let parent_entries = directories.entry(parent_ino).or_default();
 
@@ -160,6 +171,16 @@ impl VersionedFUSE {
                 directories.entry(ino).or_default();
             }
         }
+    }
+
+    /// Get parent inode for a given inode
+    fn get_parent_ino(&self, ino: Ino) -> Ino {
+        self.parent_inodes
+            .read()
+            .unwrap()
+            .get(&ino)
+            .copied()
+            .unwrap_or(ROOT_INO)
     }
 
     /// Get existing inode or create new one for a path
@@ -385,6 +406,9 @@ impl Filesystem for VersionedFUSE {
             }
         };
 
+        // Get real parent inode
+        let parent_ino = self.get_parent_ino(ino);
+
         // Always include . and ..
         let mut all_entries = vec![
             DirEntry {
@@ -393,7 +417,7 @@ impl Filesystem for VersionedFUSE {
                 kind: FileKind::Directory,
             },
             DirEntry {
-                ino: ROOT_INO, // TODO: track real parent
+                ino: parent_ino,
                 name: "..".to_string(),
                 kind: FileKind::Directory,
             },
@@ -780,6 +804,287 @@ impl Filesystem for VersionedFUSE {
         };
 
         reply.entry(&self.entry_ttl, &attr.into(), 0);
+    }
+
+    fn mkdir(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        reply: ReplyEntry,
+    ) {
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => {
+                reply.error(libc::EINVAL);
+                return;
+            }
+        };
+
+        // Get parent path
+        let parent_path = match self.get_path(parent) {
+            Some(p) => p,
+            None => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+        };
+
+        // Construct directory path
+        let dir_path = if parent_path == "/" {
+            format!("/{}", name_str)
+        } else {
+            format!("{}/{}", parent_path, name_str)
+        };
+
+        // Check if already exists
+        if self.get_inode(&dir_path).is_some() {
+            reply.error(libc::EEXIST);
+            return;
+        }
+
+        // Allocate inode
+        let mut next_ino = self.next_ino.write().unwrap();
+        let ino = *next_ino;
+        *next_ino += 1;
+        drop(next_ino);
+
+        // Register directory
+        let mut path_inodes = self.path_inodes.write().unwrap();
+        let mut inode_paths = self.inode_paths.write().unwrap();
+        let mut directories = self.directories.write().unwrap();
+        let mut parent_map = self.parent_inodes.write().unwrap();
+
+        path_inodes.insert(dir_path.clone(), ino);
+        inode_paths.insert(ino, dir_path);
+        directories.insert(ino, Vec::new());
+        parent_map.insert(ino, parent);
+
+        // Add to parent directory
+        if let Some(parent_entries) = directories.get_mut(&parent) {
+            parent_entries.push(DirEntry {
+                ino,
+                name: name_str.to_string(),
+                kind: FileKind::Directory,
+            });
+        }
+
+        // Create attributes
+        let now = SystemTime::now();
+        let attr = FileAttr {
+            ino,
+            size: 0,
+            blocks: 0,
+            atime: now,
+            mtime: now,
+            ctime: now,
+            crtime: now,
+            kind: FileKind::Directory,
+            perm: 0o755,
+            nlink: 2,
+            uid: 1000,
+            gid: 1000,
+            rdev: 0,
+            blksize: 4096,
+            flags: 0,
+        };
+
+        reply.entry(&self.entry_ttl, &attr.into(), 0);
+    }
+
+    fn rmdir(&mut self, _req: &Request, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => {
+                reply.error(libc::EINVAL);
+                return;
+            }
+        };
+
+        // Get parent path
+        let parent_path = match self.get_path(parent) {
+            Some(p) => p,
+            None => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+        };
+
+        // Construct directory path
+        let dir_path = if parent_path == "/" {
+            format!("/{}", name_str)
+        } else {
+            format!("{}/{}", parent_path, name_str)
+        };
+
+        // Get inode
+        let ino = match self.get_inode(&dir_path) {
+            Some(i) => i,
+            None => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+        };
+
+        // Check if it's a directory and if it's empty
+        {
+            let directories = self.directories.read().unwrap();
+            match directories.get(&ino) {
+                Some(entries) if !entries.is_empty() => {
+                    reply.error(libc::ENOTEMPTY);
+                    return;
+                }
+                None => {
+                    reply.error(libc::ENOTDIR);
+                    return;
+                }
+                _ => {}
+            }
+        }
+
+        // Remove from structures
+        let mut path_inodes = self.path_inodes.write().unwrap();
+        let mut inode_paths = self.inode_paths.write().unwrap();
+        let mut directories = self.directories.write().unwrap();
+        let mut parent_map = self.parent_inodes.write().unwrap();
+
+        path_inodes.remove(&dir_path);
+        inode_paths.remove(&ino);
+        directories.remove(&ino);
+        parent_map.remove(&ino);
+
+        // Remove from parent directory
+        if let Some(parent_entries) = directories.get_mut(&parent) {
+            parent_entries.retain(|e| e.name != name_str);
+        }
+
+        reply.ok();
+    }
+
+    fn rename(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        name: &OsStr,
+        newparent: u64,
+        newname: &OsStr,
+        _flags: u32,
+        reply: ReplyEmpty,
+    ) {
+        let name_str = match name.to_str() {
+            Some(s) => s,
+            None => {
+                reply.error(libc::EINVAL);
+                return;
+            }
+        };
+
+        let newname_str = match newname.to_str() {
+            Some(s) => s,
+            None => {
+                reply.error(libc::EINVAL);
+                return;
+            }
+        };
+
+        // Get parent paths
+        let parent_path = match self.get_path(parent) {
+            Some(p) => p,
+            None => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+        };
+
+        let newparent_path = match self.get_path(newparent) {
+            Some(p) => p,
+            None => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+        };
+
+        // Construct paths
+        let old_path = if parent_path == "/" {
+            format!("/{}", name_str)
+        } else {
+            format!("{}/{}", parent_path, name_str)
+        };
+
+        let new_path = if newparent_path == "/" {
+            format!("/{}", newname_str)
+        } else {
+            format!("{}/{}", newparent_path, newname_str)
+        };
+
+        // Get old inode
+        let ino = match self.get_inode(&old_path) {
+            Some(i) => i,
+            None => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+        };
+
+        // Get entry kind
+        let kind = {
+            let directories = self.directories.read().unwrap();
+            if directories.contains_key(&ino) {
+                FileKind::Directory
+            } else {
+                FileKind::RegularFile
+            }
+        };
+
+        // Remove old entry from parent
+        {
+            let mut directories = self.directories.write().unwrap();
+            if let Some(parent_entries) = directories.get_mut(&parent) {
+                parent_entries.retain(|e| e.name != name_str);
+            }
+        }
+
+        // Update path mappings
+        {
+            let mut path_inodes = self.path_inodes.write().unwrap();
+            let mut inode_paths = self.inode_paths.write().unwrap();
+            let mut parent_map = self.parent_inodes.write().unwrap();
+
+            path_inodes.remove(&old_path);
+            path_inodes.insert(new_path.clone(), ino);
+            inode_paths.insert(ino, new_path.clone());
+            parent_map.insert(ino, newparent);
+        }
+
+        // Add new entry to new parent
+        {
+            let mut directories = self.directories.write().unwrap();
+            let new_parent_entries = directories.entry(newparent).or_default();
+
+            // Remove any existing entry with the new name
+            new_parent_entries.retain(|e| e.name != newname_str);
+
+            new_parent_entries.push(DirEntry {
+                ino,
+                name: newname_str.to_string(),
+                kind,
+            });
+        }
+
+        // If it's a file in the underlying fs, we need to rename it there too
+        if kind == FileKind::RegularFile {
+            // Read old file, write to new path, delete old
+            if let Ok((data, version)) = self.fs.read_file(&old_path) {
+                // Write to new location
+                let _ = self.fs.write_file(&new_path, &data, None);
+                // Delete old file
+                let _ = self.fs.delete_file(&old_path, version);
+            }
+        }
+
+        reply.ok();
     }
 }
 

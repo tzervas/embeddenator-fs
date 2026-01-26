@@ -194,6 +194,72 @@ pub trait BlockDevice: Send + Sync {
     }
 }
 
+/// Synchronous block device interface for use with sync libraries (e.g., ext4 crate)
+///
+/// This trait is used when interfacing with synchronous filesystem libraries
+/// that require blocking I/O operations.
+#[cfg(feature = "disk-image")]
+pub trait BlockDeviceSync: Send + Sync {
+    /// Read bytes at the given offset (blocking)
+    fn read_at_sync(&self, buf: &mut [u8], offset: u64) -> DiskResult<usize>;
+
+    /// Get total size in bytes
+    fn size(&self) -> u64;
+
+    /// Get logical block size
+    fn block_size(&self) -> u32 {
+        512
+    }
+}
+
+/// Reader that wraps a BlockDeviceSync to read from a specific partition
+///
+/// This implements `positioned_io2::ReadAt` which is required by the ext4 crate.
+#[cfg(feature = "disk-image")]
+pub struct PartitionReader<'a> {
+    device: &'a dyn BlockDeviceSync,
+    partition: &'a PartitionInfo,
+}
+
+#[cfg(feature = "disk-image")]
+impl<'a> PartitionReader<'a> {
+    pub fn new(device: &'a dyn BlockDeviceSync, partition: &'a PartitionInfo) -> Self {
+        Self { device, partition }
+    }
+}
+
+#[cfg(feature = "disk-image")]
+impl positioned_io2::ReadAt for PartitionReader<'_> {
+    fn read_at(&self, pos: u64, buf: &mut [u8]) -> std::io::Result<usize> {
+        let absolute_offset = self.partition.start_offset + pos;
+        self.device
+            .read_at_sync(buf, absolute_offset)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))
+    }
+}
+
+#[cfg(feature = "disk-image")]
+impl std::io::Read for PartitionReader<'_> {
+    fn read(&mut self, _buf: &mut [u8]) -> std::io::Result<usize> {
+        // Sequential reads not supported - use ReadAt interface
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "PartitionReader requires positioned reads (ReadAt)",
+        ))
+    }
+}
+
+#[cfg(feature = "disk-image")]
+impl std::io::Seek for PartitionReader<'_> {
+    fn seek(&mut self, _pos: std::io::SeekFrom) -> std::io::Result<u64> {
+        // Seeking not supported - use ReadAt interface
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "PartitionReader requires positioned reads (ReadAt)",
+        ))
+    }
+}
+
 /// Open a disk image with automatic format detection
 ///
 /// # Example

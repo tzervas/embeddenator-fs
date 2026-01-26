@@ -590,16 +590,34 @@ impl VersionedEmbrFS {
         }
     }
 
+    // === Public helper methods for streaming API ===
+
+    /// Get the VSA configuration
+    pub fn config(&self) -> &ReversibleVSAConfig {
+        &self.config
+    }
+
+    /// Allocate a new unique chunk ID (public for streaming API)
+    pub fn allocate_chunk_id(&self) -> ChunkId {
+        self.next_chunk_id.fetch_add(1, Ordering::AcqRel) as ChunkId
+    }
+
+    /// Bundle chunks into root - streaming variant that doesn't retry on mismatch
+    ///
+    /// For streaming ingestion, we bundle progressively without requiring
+    /// atomicity since we're building up the root from scratch.
+    pub fn bundle_chunks_to_root_streaming(
+        &self,
+        chunk_ids: &[ChunkId],
+    ) -> Result<(), EmbrFSError> {
+        self.bundle_chunks_to_root(chunk_ids)
+    }
+
     // === Private helper methods ===
 
     /// Chunk data into DEFAULT_CHUNK_SIZE blocks
     fn chunk_data<'a>(&self, data: &'a [u8]) -> Vec<&'a [u8]> {
         data.chunks(DEFAULT_CHUNK_SIZE).collect()
-    }
-
-    /// Allocate a new unique chunk ID
-    fn allocate_chunk_id(&self) -> ChunkId {
-        self.next_chunk_id.fetch_add(1, Ordering::AcqRel) as ChunkId
     }
 
     /// Bundle chunks into root with CAS retry loop

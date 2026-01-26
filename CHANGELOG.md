@@ -5,7 +5,63 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.23.1] - 2026-01-26
+
+### Changed
+- **Supply Chain Security**: Documented maintained dependency ecosystem for unmaintained crates
+  - `qlora-paste` (v1.0.20) - maintained fork of unmaintained `paste` crate
+  - `qlora-gemm` (v0.20.0) - maintained fork of unmaintained `gemm` crate
+  - See [MAINTAINED_DEPENDENCIES.md](../MAINTAINED_DEPENDENCIES.md) for integration guide
+  - Upstream PR: https://github.com/huggingface/candle/pull/3335
+
+## [0.23.1] - 2026-01-26
+
+### Changed
+- **Supply Chain Security**: Documented maintained dependency ecosystem
+  - `qlora-paste` (v1.0.20) - maintained fork of unmaintained `paste`
+  - `qlora-gemm` (v0.20.0) - maintained fork of unmaintained `gemm`
+  - See [MAINTAINED_DEPENDENCIES.md](../MAINTAINED_DEPENDENCIES.md) for integration guide
+- Upstream PR: https://github.com/huggingface/candle/pull/3335
+
 ## [Unreleased]
+
+### Added
+- **StreamingIngester**: Memory-efficient sync API for large file ingestion
+  - `StreamingIngesterBuilder` with configurable chunk sizes and callbacks
+  - `ingest_reader()`, `ingest_buffered()`, `ingest_bytes()` methods
+  - `PendingChunk` for batched insertion to VersionedEmbrFS
+  - Sub-MB memory footprint for multi-GB files
+  
+- **AsyncStreamingIngester**: Async variant for non-blocking I/O
+  - `AsyncStreamingIngesterBuilder` mirroring sync API
+  - `ingest_async_reader()` for `tokio::io::AsyncRead` sources
+  - `ingest_async_buffered()` for `tokio::io::AsyncBufRead` sources
+  - Feature-gated with `async-streaming` or `disk-image*` features
+  
+- **Large File Algorithm Improvements**: Hierarchical sub-engram encoding
+  - `LargeFileHandler` with adaptive chunk sizing based on entropy
+  - Sub-engrams bundled with MAX_BUNDLE_CAPACITY=100
+  - Entropy-aware chunk sizes: 8KB (low), 16KB (medium), 32KB (high)
+  - Hierarchical structure enables efficient partial retrieval
+
+- **FUSE Read/Write Operations**: Full filesystem mutation support
+  - `mkdir()`, `rmdir()`, `rename()` operations
+  - Parent inode tracking for proper directory navigation
+  - Fixed `readdir()` to use actual parent instead of ROOT_INO
+  - Completes R/W FUSE support (was read-only for testing)
+
+- **Disk Image Enhancements**:
+  - QCOW2 full `read_at()` with L1/L2 table lookups and backing file chains
+  - MBR extended partition parsing (EBR chain traversal)
+  - ext4 filesystem traversal via walk_sync() with ext4 crate integration
+  - `BlockDeviceSync` trait for synchronous filesystem libraries
+  - `PartitionReader` implementing `positioned_io2::ReadAt`
+
+### Changed
+- `VersionedEmbrFS`: Made `config()`, `allocate_chunk_id()`, and 
+  `bundle_chunks_to_root_streaming()` methods public for streaming API
+- Added `positioned-io2` dependency for ext4 crate integration
+- New feature flag: `async-streaming` for async API without disk-image deps
 
 ## [0.23.0] - 2026-01-25
 

@@ -1,16 +1,21 @@
 //! Scale tests for large files and directories
 //!
 //! These tests are marked with #[ignore] and are NOT run in CI.
+//! They are intended for manual validation on systems with sufficient resources.
+//!
 //! Run locally with: cargo test --test scale_tests -- --ignored --nocapture
 //!
 //! For large file tests, set SCALE_TEST_DIR to a path with enough space:
 //!   SCALE_TEST_DIR=/home/user/tmp cargo test --test scale_tests -- --ignored --nocapture
 //!
-//! These tests verify:
+//! These tests validate:
 //! - Large file handling (1GB+)
 //! - Deep directory hierarchies (10K+ files)
 //! - Memory efficiency under load
 //! - Concurrent large operations
+//!
+//! Note: These tests document known limitations and expected behavior at scale.
+//! Results may vary based on system configuration and available resources.
 
 use std::io::{self, Write};
 use std::path::PathBuf;

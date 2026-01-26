@@ -1,6 +1,8 @@
 pub mod correction;
 pub mod embrfs;
 pub mod fuse_shim;
+pub mod large_file;
+pub mod streaming;
 pub mod versioned;
 pub mod versioned_embrfs;
 pub mod versioned_fuse;
@@ -8,6 +10,8 @@ pub mod versioned_fuse;
 pub use correction::*;
 pub use embrfs::*;
 pub use fuse_shim::*;
+pub use large_file::*;
+pub use streaming::*;
 pub use versioned::*;
 
 // Re-export main types from versioned_embrfs (not all to avoid name conflicts)

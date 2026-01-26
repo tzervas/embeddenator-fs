@@ -399,9 +399,20 @@ impl PartitionTable {
                 uuid: None,
                 fs_hint: None,
             });
-        }
 
-        // TODO: Parse extended partitions (type 0x05 or 0x0F)
+            // Check for extended partition (type 0x05, 0x0F, or 0x85)
+            if type_byte == 0x05 || type_byte == 0x0F || type_byte == 0x85 {
+                // Parse extended partitions recursively
+                let extended_partitions = Self::parse_extended_partitions(
+                    device,
+                    start_lba,
+                    start_lba, // EBR base for relative addressing
+                    partitions.len() as u32,
+                )
+                .await?;
+                partitions.extend(extended_partitions);
+            }
+        }
 
         Ok(Self {
             scheme: PartitionScheme::Mbr,
@@ -409,6 +420,80 @@ impl PartitionTable {
             disk_size: device.size(),
             block_size: 512,
         })
+    }
+
+    /// Parse extended partitions (logical drives in extended partition)
+    ///
+    /// Extended partitions use a linked list of Extended Boot Records (EBR).
+    /// Each EBR contains:
+    /// - Entry 0: Logical partition relative to this EBR
+    /// - Entry 1: Next EBR relative to extended partition start
+    /// - Entries 2-3: Unused
+    async fn parse_extended_partitions(
+        device: &dyn BlockDevice,
+        ebr_lba: u64,
+        extended_start_lba: u64,
+        start_number: u32,
+    ) -> DiskResult<Vec<PartitionInfo>> {
+        let mut partitions = Vec::new();
+        let mut current_ebr_lba = ebr_lba;
+        let mut partition_num = start_number;
+
+        // Safety limit to prevent infinite loops from corrupt partition tables
+        const MAX_LOGICAL_PARTITIONS: usize = 128;
+
+        while partitions.len() < MAX_LOGICAL_PARTITIONS {
+            // Read EBR
+            let mut ebr = [0u8; 512];
+            device.read_at(&mut ebr, current_ebr_lba * 512).await?;
+
+            // Verify EBR signature
+            if ebr[510] != 0x55 || ebr[511] != 0xAA {
+                break; // End of chain or corrupt
+            }
+
+            // Parse entry 0: logical partition (relative to this EBR)
+            let entry0 = &ebr[446..462];
+            let type0 = entry0[4];
+
+            if type0 != 0 {
+                let start_lba0 = u32::from_le_bytes(entry0[8..12].try_into().unwrap()) as u64;
+                let num_sectors0 = u32::from_le_bytes(entry0[12..16].try_into().unwrap()) as u64;
+
+                // Logical partition offset is relative to this EBR
+                let absolute_start = current_ebr_lba + start_lba0;
+
+                partitions.push(PartitionInfo {
+                    number: partition_num,
+                    name: format!("Logical Partition {}", partition_num + 1),
+                    partition_type: PartitionType::from_mbr_type(type0),
+                    start_offset: absolute_start * 512,
+                    size: num_sectors0 * 512,
+                    uuid: None,
+                    fs_hint: None,
+                });
+                partition_num += 1;
+            }
+
+            // Parse entry 1: next EBR (relative to extended partition start)
+            let entry1 = &ebr[462..478];
+            let type1 = entry1[4];
+
+            if type1 == 0 {
+                break; // No more EBRs
+            }
+
+            if type1 != 0x05 && type1 != 0x0F && type1 != 0x85 {
+                break; // Not an extended partition entry
+            }
+
+            let start_lba1 = u32::from_le_bytes(entry1[8..12].try_into().unwrap()) as u64;
+
+            // Next EBR offset is relative to the original extended partition
+            current_ebr_lba = extended_start_lba + start_lba1;
+        }
+
+        Ok(partitions)
     }
 
     /// Format a GUID as a string
