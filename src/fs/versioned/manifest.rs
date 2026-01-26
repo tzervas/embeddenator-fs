@@ -1,7 +1,109 @@
-//! Versioned manifest with file-level versioning
+//! Versioned Manifest with File-Level Versioning
+//! ==============================================
 //!
-//! The manifest stores file metadata with per-file version tracking.
-//! Each file entry has its own version number for fine-grained optimistic locking.
+//! The manifest is the "table of contents" for an engram - it stores file metadata
+//! with per-file version tracking for concurrent access control.
+//!
+//! # Why a Manifest?
+//!
+//! An engram stores file data as chunks in a content-addressed store. The manifest
+//! provides the mapping from file paths to chunks, along with all the metadata
+//! needed to reconstruct the original filesystem:
+//!
+//! - **Path → Chunks**: Which chunks make up each file
+//! - **Metadata**: Permissions, timestamps, ownership
+//! - **File Types**: Regular, symlink, device, etc.
+//! - **Versioning**: Concurrent modification detection
+//!
+//! Without the manifest, chunks would be meaningless binary blobs.
+//!
+//! # Why Per-File Versioning?
+//!
+//! Traditional locking (mutexes, reader-writer locks) has problems:
+//!
+//! - **Coarse locking**: Locking the whole manifest blocks all operations
+//! - **Fine locking**: Locking per-file requires many locks (memory/complexity)
+//! - **Deadlocks**: Multiple locks risk deadlock situations
+//!
+//! We use **optimistic concurrency control** instead:
+//!
+//! 1. Read file entry with its current version
+//! 2. Make modifications to your local copy
+//! 3. Write back with expected version
+//! 4. If version changed, someone else modified it - retry
+//!
+//! This approach:
+//! - **No locks held during computation**: Only brief atomic operations
+//! - **Scales with concurrency**: No contention on different files
+//! - **Simple recovery**: No lock state to recover after crash
+//! - **Good for reads**: Reads never block, always see consistent snapshot
+//!
+//! The cost is occasional retries when conflicts occur, but conflicts are rare
+//! in most workloads (different files accessed concurrently).
+//!
+//! # Why These File Types?
+//!
+//! Unix filesystems have 7 file types, and we support them all:
+//!
+//! | Type | Why It Exists | Our Handling |
+//! |------|--------------|--------------|
+//! | Regular | Normal files | Chunks contain file data |
+//! | Directory | Organize files | Metadata only (listing is a query) |
+//! | Symlink | Flexible references | Store target path, no data |
+//! | Hardlink | Multiple names for same file | Store target path, shares chunks |
+//! | CharDevice | Unbuffered I/O (terminal) | Usually metadata-only |
+//! | BlockDevice | Buffered I/O (disk) | Option C: can encode data |
+//! | FIFO | Inter-process communication | Metadata only |
+//! | Socket | Network-style local IPC | Metadata only |
+//!
+//! # Option C: Device Data Encoding
+//!
+//! Block devices are special. Most devices in `/dev` are hardware interfaces
+//! with no persistent data. But some block devices ARE persistent data:
+//!
+//! - `/dev/loop0` - Loop device with disk image
+//! - `/dev/nbd0` - Network block device
+//! - `/dev/mapper/encrypted` - LUKS encrypted volume
+//!
+//! "Option C" encoding captures this data:
+//!
+//! ```text
+//! Option A: Metadata only (default for most devices)
+//!   /dev/sda → {type: block, major: 8, minor: 0, chunks: []}
+//!
+//! Option B: Full device encoding (explicit request)
+//!   /dev/loop0 → {type: block, major: 7, minor: 0, chunks: [c1, c2, ...]}
+//!
+//! Option C: Compressed device encoding (for large devices)
+//!   /dev/loop0 → {type: block, compressed: zstd, chunks: [c1, c2, ...]}
+//! ```
+//!
+//! # Why Compression Tracking in Manifest?
+//!
+//! Compression is stored per-file rather than per-chunk because:
+//!
+//! 1. **Different files compress differently**: Text vs binary vs already-compressed
+//! 2. **User preferences**: Some files shouldn't be compressed (already compressed)
+//! 3. **Streaming decode**: Know decompressor before reading first chunk
+//! 4. **Size validation**: Track uncompressed size for progress/validation
+//!
+//! # Manifest Structure
+//!
+//! ```text
+//! ┌─────────────────────────────────────────────────────────────┐
+//! │ Manifest                                                    │
+//! ├─────────────────────────────────────────────────────────────┤
+//! │ files: HashMap<String, VersionedFileEntry>                  │
+//! │   └─ Path → Entry with version tracking                    │
+//! │ global_version: AtomicU64                                   │
+//! │   └─ Monotonic counter for version assignment              │
+//! │ path_index: HashMap<String, Vec<String>>                    │
+//! │   └─ Directory → Children for fast listing                 │
+//! └─────────────────────────────────────────────────────────────┘
+//! ```
+//!
+//! The path index exists because directory listing is O(n) without it.
+//! With the index, listing a directory is O(children) regardless of total files.
 
 use super::types::{ChunkId, VersionMismatch, VersionedResult};
 use std::collections::HashMap;
@@ -9,11 +111,141 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
+/// File type for special file handling
+///
+/// # Option C: Device Encoding
+///
+/// Block devices can optionally have their content encoded (Option C).
+/// This is useful for:
+/// - Loop devices with actual disk images
+/// - VM disk images mounted as block devices
+/// - Partition backups
+///
+/// For most devices in /dev, the chunks will be empty (metadata-only).
+/// Use `new_device_with_data` or `new_device_compressed` for Option C encoding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum FileType {
+    /// Regular file (default)
+    #[default]
+    Regular = 0,
+    /// Directory
+    Directory = 1,
+    /// Symbolic link (target stored in symlink_target field)
+    Symlink = 2,
+    /// Hard link (target stored in hardlink_target field)
+    Hardlink = 3,
+    /// Character device (typically metadata-only, but can have data with Option C)
+    CharDevice = 4,
+    /// Block device (typically metadata-only, but can have data with Option C)
+    BlockDevice = 5,
+    /// FIFO/named pipe (metadata only)
+    Fifo = 6,
+    /// Unix socket (metadata only)
+    Socket = 7,
+}
+
+impl FileType {
+    /// Returns true if this file type has actual data content
+    pub fn has_content(&self) -> bool {
+        matches!(self, FileType::Regular)
+    }
+
+    /// Returns true if this file type CAN have data content (Option C devices)
+    pub fn can_have_content(&self) -> bool {
+        matches!(
+            self,
+            FileType::Regular | FileType::CharDevice | FileType::BlockDevice
+        )
+    }
+
+    /// Returns true if this file type is always metadata-only (no data possible)
+    pub fn is_metadata_only(&self) -> bool {
+        matches!(self, FileType::Fifo | FileType::Socket)
+    }
+
+    /// Returns true if this is a link type
+    pub fn is_link(&self) -> bool {
+        matches!(self, FileType::Symlink | FileType::Hardlink)
+    }
+
+    /// Returns true if this is a device node
+    pub fn is_device(&self) -> bool {
+        matches!(self, FileType::CharDevice | FileType::BlockDevice)
+    }
+}
+
+/// Unix file permissions and ownership
+#[derive(Debug, Clone, Copy, Default)]
+pub struct FilePermissions {
+    /// User ID (owner)
+    pub uid: u32,
+    /// Group ID
+    pub gid: u32,
+    /// File mode (permission bits + special bits like setuid/setgid/sticky)
+    pub mode: u32,
+}
+
+impl FilePermissions {
+    /// Create new permissions with specified uid, gid, and mode
+    pub fn new(uid: u32, gid: u32, mode: u32) -> Self {
+        Self { uid, gid, mode }
+    }
+
+    /// Default permissions for a regular file (0644, root:root)
+    pub fn default_file() -> Self {
+        Self {
+            uid: 0,
+            gid: 0,
+            mode: 0o644,
+        }
+    }
+
+    /// Default permissions for a directory (0755, root:root)
+    pub fn default_dir() -> Self {
+        Self {
+            uid: 0,
+            gid: 0,
+            mode: 0o755,
+        }
+    }
+
+    /// Check if setuid bit is set
+    pub fn is_setuid(&self) -> bool {
+        self.mode & 0o4000 != 0
+    }
+
+    /// Check if setgid bit is set
+    pub fn is_setgid(&self) -> bool {
+        self.mode & 0o2000 != 0
+    }
+
+    /// Check if sticky bit is set
+    pub fn is_sticky(&self) -> bool {
+        self.mode & 0o1000 != 0
+    }
+}
+
 /// A versioned file entry in the manifest
 #[derive(Debug, Clone)]
 pub struct VersionedFileEntry {
     /// File path (relative to engram root)
     pub path: String,
+
+    /// Type of file (regular, symlink, device, etc.)
+    pub file_type: FileType,
+
+    /// Unix permissions (uid, gid, mode)
+    pub permissions: FilePermissions,
+
+    /// Symlink target path (only for FileType::Symlink)
+    pub symlink_target: Option<String>,
+
+    /// Hardlink target path (only for FileType::Hardlink)
+    pub hardlink_target: Option<String>,
+
+    /// Device major/minor numbers (only for char/block devices)
+    pub device_id: Option<(u32, u32)>,
 
     /// Is this a text file? (affects encoding strategy)
     pub is_text: bool,
@@ -27,6 +259,13 @@ pub struct VersionedFileEntry {
     /// Is this file marked as deleted? (soft delete)
     pub deleted: bool,
 
+    /// Compression codec used (0=None, 1=Zstd, 2=Lz4)
+    /// None means no compression (backward compatible)
+    pub compression_codec: Option<u8>,
+
+    /// Original uncompressed size (for compressed files)
+    pub uncompressed_size: Option<usize>,
+
     /// Version number of this file entry
     pub version: u64,
 
@@ -38,15 +277,297 @@ pub struct VersionedFileEntry {
 }
 
 impl VersionedFileEntry {
-    /// Create a new file entry
+    /// Create a new file entry for a regular file
     pub fn new(path: String, is_text: bool, size: usize, chunks: Vec<ChunkId>) -> Self {
         let now = Instant::now();
         Self {
             path,
+            file_type: FileType::Regular,
+            permissions: FilePermissions::default_file(),
+            symlink_target: None,
+            hardlink_target: None,
+            device_id: None,
             is_text,
             size,
             chunks,
             deleted: false,
+            compression_codec: None,
+            uncompressed_size: None,
+            version: 0,
+            created_at: now,
+            modified_at: now,
+        }
+    }
+
+    /// Create a new file entry with full metadata
+    pub fn new_with_metadata(
+        path: String,
+        file_type: FileType,
+        permissions: FilePermissions,
+        is_text: bool,
+        size: usize,
+        chunks: Vec<ChunkId>,
+    ) -> Self {
+        let now = Instant::now();
+        Self {
+            path,
+            file_type,
+            permissions,
+            symlink_target: None,
+            hardlink_target: None,
+            device_id: None,
+            is_text,
+            size,
+            chunks,
+            deleted: false,
+            compression_codec: None,
+            uncompressed_size: None,
+            version: 0,
+            created_at: now,
+            modified_at: now,
+        }
+    }
+
+    /// Create a symlink entry
+    pub fn new_symlink(path: String, target: String, permissions: FilePermissions) -> Self {
+        let now = Instant::now();
+        Self {
+            path,
+            file_type: FileType::Symlink,
+            permissions,
+            symlink_target: Some(target),
+            hardlink_target: None,
+            device_id: None,
+            is_text: false,
+            size: 0,
+            chunks: Vec::new(),
+            deleted: false,
+            compression_codec: None,
+            uncompressed_size: None,
+            version: 0,
+            created_at: now,
+            modified_at: now,
+        }
+    }
+
+    /// Create a hardlink entry
+    pub fn new_hardlink(path: String, target: String, permissions: FilePermissions) -> Self {
+        let now = Instant::now();
+        Self {
+            path,
+            file_type: FileType::Hardlink,
+            permissions,
+            symlink_target: None,
+            hardlink_target: Some(target),
+            device_id: None,
+            is_text: false,
+            size: 0,
+            chunks: Vec::new(),
+            deleted: false,
+            compression_codec: None,
+            uncompressed_size: None,
+            version: 0,
+            created_at: now,
+            modified_at: now,
+        }
+    }
+
+    /// Create a device node entry (Option C: with encoded data)
+    ///
+    /// Option C encodes actual device data for block devices (e.g., loop devices).
+    /// For most devices in /dev, this will be empty. For block devices with
+    /// actual content (like a disk image mounted as a loop device), this allows
+    /// encoding the full device content.
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Device path (e.g., "/dev/loop0")
+    /// * `is_char` - true for character device, false for block device
+    /// * `major` - Major device number
+    /// * `minor` - Minor device number
+    /// * `permissions` - Unix permissions
+    /// * `size` - Size of device data (0 for metadata-only)
+    /// * `chunks` - Chunk IDs for device data (empty for metadata-only)
+    pub fn new_device(
+        path: String,
+        is_char: bool,
+        major: u32,
+        minor: u32,
+        permissions: FilePermissions,
+    ) -> Self {
+        let now = Instant::now();
+        Self {
+            path,
+            file_type: if is_char {
+                FileType::CharDevice
+            } else {
+                FileType::BlockDevice
+            },
+            permissions,
+            symlink_target: None,
+            hardlink_target: None,
+            device_id: Some((major, minor)),
+            is_text: false,
+            size: 0,
+            chunks: Vec::new(),
+            deleted: false,
+            compression_codec: None,
+            uncompressed_size: None,
+            version: 0,
+            created_at: now,
+            modified_at: now,
+        }
+    }
+
+    /// Create a device node entry with data (Option C full encoding)
+    ///
+    /// Use this for block devices that have actual content to encode,
+    /// such as loop devices or disk images.
+    pub fn new_device_with_data(
+        path: String,
+        is_char: bool,
+        major: u32,
+        minor: u32,
+        permissions: FilePermissions,
+        size: usize,
+        chunks: Vec<ChunkId>,
+    ) -> Self {
+        let now = Instant::now();
+        Self {
+            path,
+            file_type: if is_char {
+                FileType::CharDevice
+            } else {
+                FileType::BlockDevice
+            },
+            permissions,
+            symlink_target: None,
+            hardlink_target: None,
+            device_id: Some((major, minor)),
+            is_text: false,
+            size,
+            chunks,
+            deleted: false,
+            compression_codec: None,
+            uncompressed_size: None,
+            version: 0,
+            created_at: now,
+            modified_at: now,
+        }
+    }
+
+    /// Create a device node with compressed data (Option C)
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_device_compressed(
+        path: String,
+        is_char: bool,
+        major: u32,
+        minor: u32,
+        permissions: FilePermissions,
+        compressed_size: usize,
+        uncompressed_size: usize,
+        compression_codec: u8,
+        chunks: Vec<ChunkId>,
+    ) -> Self {
+        let now = Instant::now();
+        Self {
+            path,
+            file_type: if is_char {
+                FileType::CharDevice
+            } else {
+                FileType::BlockDevice
+            },
+            permissions,
+            symlink_target: None,
+            hardlink_target: None,
+            device_id: Some((major, minor)),
+            is_text: false,
+            size: compressed_size,
+            chunks,
+            deleted: false,
+            compression_codec: Some(compression_codec),
+            uncompressed_size: Some(uncompressed_size),
+            version: 0,
+            created_at: now,
+            modified_at: now,
+        }
+    }
+
+    /// Create a special file entry (FIFO or socket - metadata only)
+    pub fn new_special(path: String, file_type: FileType, permissions: FilePermissions) -> Self {
+        let now = Instant::now();
+        Self {
+            path,
+            file_type,
+            permissions,
+            symlink_target: None,
+            hardlink_target: None,
+            device_id: None,
+            is_text: false,
+            size: 0,
+            chunks: Vec::new(),
+            deleted: false,
+            compression_codec: None,
+            uncompressed_size: None,
+            version: 0,
+            created_at: now,
+            modified_at: now,
+        }
+    }
+
+    /// Create a new file entry with compression metadata
+    pub fn new_compressed(
+        path: String,
+        is_text: bool,
+        compressed_size: usize,
+        uncompressed_size: usize,
+        compression_codec: u8,
+        chunks: Vec<ChunkId>,
+    ) -> Self {
+        let now = Instant::now();
+        Self {
+            path,
+            file_type: FileType::Regular,
+            permissions: FilePermissions::default_file(),
+            symlink_target: None,
+            hardlink_target: None,
+            device_id: None,
+            is_text,
+            size: compressed_size,
+            chunks,
+            deleted: false,
+            compression_codec: Some(compression_codec),
+            uncompressed_size: Some(uncompressed_size),
+            version: 0,
+            created_at: now,
+            modified_at: now,
+        }
+    }
+
+    /// Create a new file entry with compression and full metadata
+    pub fn new_compressed_with_metadata(
+        path: String,
+        permissions: FilePermissions,
+        is_text: bool,
+        compressed_size: usize,
+        uncompressed_size: usize,
+        compression_codec: u8,
+        chunks: Vec<ChunkId>,
+    ) -> Self {
+        let now = Instant::now();
+        Self {
+            path,
+            file_type: FileType::Regular,
+            permissions,
+            symlink_target: None,
+            hardlink_target: None,
+            device_id: None,
+            is_text,
+            size: compressed_size,
+            chunks,
+            deleted: false,
+            compression_codec: Some(compression_codec),
+            uncompressed_size: Some(uncompressed_size),
             version: 0,
             created_at: now,
             modified_at: now,
@@ -57,10 +578,44 @@ impl VersionedFileEntry {
     pub fn update(&self, new_chunks: Vec<ChunkId>, new_size: usize) -> Self {
         Self {
             path: self.path.clone(),
+            file_type: self.file_type,
+            permissions: self.permissions,
+            symlink_target: self.symlink_target.clone(),
+            hardlink_target: self.hardlink_target.clone(),
+            device_id: self.device_id,
             is_text: self.is_text,
             size: new_size,
             chunks: new_chunks,
             deleted: false,
+            compression_codec: self.compression_codec,
+            uncompressed_size: self.uncompressed_size,
+            version: self.version + 1,
+            created_at: self.created_at,
+            modified_at: Instant::now(),
+        }
+    }
+
+    /// Create an updated version with new compression settings
+    pub fn update_compressed(
+        &self,
+        new_chunks: Vec<ChunkId>,
+        compressed_size: usize,
+        uncompressed_size: usize,
+        compression_codec: u8,
+    ) -> Self {
+        Self {
+            path: self.path.clone(),
+            file_type: self.file_type,
+            permissions: self.permissions,
+            symlink_target: self.symlink_target.clone(),
+            hardlink_target: self.hardlink_target.clone(),
+            device_id: self.device_id,
+            is_text: self.is_text,
+            size: compressed_size,
+            chunks: new_chunks,
+            deleted: false,
+            compression_codec: Some(compression_codec),
+            uncompressed_size: Some(uncompressed_size),
             version: self.version + 1,
             created_at: self.created_at,
             modified_at: Instant::now(),
@@ -74,6 +629,16 @@ impl VersionedFileEntry {
         updated.version += 1;
         updated.modified_at = Instant::now();
         updated
+    }
+
+    /// Check if this entry represents a regular file with content
+    pub fn is_regular_file(&self) -> bool {
+        self.file_type == FileType::Regular
+    }
+
+    /// Check if this entry is metadata-only (no data to encode)
+    pub fn is_metadata_only(&self) -> bool {
+        self.file_type.is_metadata_only()
     }
 }
 

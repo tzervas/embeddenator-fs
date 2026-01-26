@@ -92,19 +92,19 @@ tar czf backup.tar.gz -C /mnt/embrfs .
 
 | Operation   | Description                          | Status | Notes                          |
 |-------------|--------------------------------------|--------|--------------------------------|
-| `init`      | Initialize filesystem                | ✅ Full | Called on mount               |
-| `destroy`   | Cleanup on unmount                   | ✅ Full | Called on unmount             |
-| `lookup`    | Resolve filename to inode            | ✅ Full | Path normalization applied    |
-| `getattr`   | Get file/directory attributes        | ✅ Full | Returns size, mode, timestamps|
-| `read`      | Read file data                       | ✅ Full | Supports offset and size      |
-| `open`      | Open file for reading                | ✅ Full | Read-only enforcement (O_RDONLY)|
-| `release`   | Close file handle                    | ✅ Full | Cleanup file state            |
-| `opendir`   | Open directory                       | ✅ Full | Validates directory exists    |
-| `readdir`   | Read directory entries               | ✅ Full | Includes `.` and `..`         |
-| `releasedir`| Close directory handle               | ✅ Full | Cleanup directory state       |
-| `statfs`    | Get filesystem statistics            | ✅ Full | Reports blocks, inodes        |
-| `access`    | Check access permissions             | ✅ Simplified | Basic mode checking      |
-| `readlink`  | Read symbolic link target            | ❌ ENOSYS | Symlinks not supported       |
+| `init`      | Initialize filesystem                |  Full | Called on mount               |
+| `destroy`   | Cleanup on unmount                   |  Full | Called on unmount             |
+| `lookup`    | Resolve filename to inode            |  Full | Path normalization applied    |
+| `getattr`   | Get file/directory attributes        |  Full | Returns size, mode, timestamps|
+| `read`      | Read file data                       |  Full | Supports offset and size      |
+| `open`      | Open file for reading                |  Full | Read-only enforcement (O_RDONLY)|
+| `release`   | Close file handle                    |  Full | Cleanup file state            |
+| `opendir`   | Open directory                       |  Full | Validates directory exists    |
+| `readdir`   | Read directory entries               |  Full | Includes `.` and `..`         |
+| `releasedir`| Close directory handle               |  Full | Cleanup directory state       |
+| `statfs`    | Get filesystem statistics            |  Full | Reports blocks, inodes        |
+| `access`    | Check access permissions             |  Simplified | Basic mode checking      |
+| `readlink`  | Read symbolic link target            |  ENOSYS | Symlinks not supported       |
 
 ### Not Implemented (Write Operations)
 
@@ -507,19 +507,19 @@ sudo systemctl disable embrfs@filesystem
 ### Attack Surface
 
 **Read-Only Nature:**
-- ✅ No write-based attacks (EROFS for all write operations)
-- ✅ No file creation/deletion
-- ✅ No permission changes
+-  No write-based attacks (EROFS for all write operations)
+-  No file creation/deletion
+-  No permission changes
 
 **Path Traversal:**
-- ✅ Mitigated by path normalization
-- ✅ All paths resolved relative to engram root
-- ✅ No `../..` escape possible
+-  Mitigated by path normalization
+-  All paths resolved relative to engram root
+-  No `../..` escape possible
 
 **Resource Exhaustion:**
-- ⚠️ Large engrams can consume memory (use hierarchical mode)
-- ⚠️ Repeated reads without caching can be slow (enable LRU cache)
-- ✅ No amplification attacks (output bounded by engram size)
+-  Large engrams can consume memory (use hierarchical mode)
+-  Repeated reads without caching can be slow (enable LRU cache)
+-  No amplification attacks (output bounded by engram size)
 
 ### Recommendations
 
@@ -537,18 +537,18 @@ sudo systemctl disable embrfs@filesystem
 4. Scan extracted files with antivirus before use
 
 **Network Exposure:**
-- ❌ Do NOT expose FUSE mountpoints over NFS or CIFS (performance issues)
-- ✅ Use API-level access for network sharing
-- ✅ Consider read-only HTTP server for web access
+-  Do NOT expose FUSE mountpoints over NFS or CIFS (performance issues)
+-  Use API-level access for network sharing
+-  Consider read-only HTTP server for web access
 
 ## Platform Support
 
 | Platform        | FUSE Support | Status | Notes                          |
 |-----------------|--------------|--------|--------------------------------|
-| Linux           | ✅ libfuse3  | Full   | Primary target, well-tested    |
-| macOS           | ✅ OSXFUSE   | Untested | Should work, not verified     |
-| Windows         | ❌ WinFsp    | No     | Future work, requires porting  |
-| FreeBSD         | ✅ fusefs    | Untested | Should work, not verified     |
+| Linux           |  libfuse3  | Full   | Primary target, well-tested    |
+| macOS           |  OSXFUSE   | Untested | Should work, not verified     |
+| Windows         |  WinFsp    | No     | Future work, requires porting  |
+| FreeBSD         |  fusefs    | Untested | Should work, not verified     |
 
 **Recommendations:**
 - **Linux:** Use libfuse3 (recommended)

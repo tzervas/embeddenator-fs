@@ -43,7 +43,7 @@ fn create_test_directory(base: &Path) -> std::io::Result<()> {
     // Create a larger file (multiple chunks)
     let mut large_file = fs::File::create(base.join("large.bin"))?;
     for i in 0..1000 {
-        write!(large_file, "Line {}: {}\n", i, "X".repeat(100))?;
+        writeln!(large_file, "Line {}: {}", i, "X".repeat(100))?;
     }
 
     Ok(())
@@ -293,7 +293,7 @@ fn test_nested_directories() {
     let extract_dir = temp_dir.path().join("extracted");
 
     // Create deeply nested structure
-    fs::create_dir_all(&source_dir.join("a/b/c/d/e")).unwrap();
+    fs::create_dir_all(source_dir.join("a/b/c/d/e")).unwrap();
     fs::write(source_dir.join("a/file1.txt"), b"level1").unwrap();
     fs::write(source_dir.join("a/b/file2.txt"), b"level2").unwrap();
     fs::write(source_dir.join("a/b/c/file3.txt"), b"level3").unwrap();

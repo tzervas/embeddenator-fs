@@ -372,9 +372,9 @@ assert_eq!(parity, reconstructed_parity, "Corruption detected");
 **EmbrFS Approach:** Store VSA approximation + corrections (~2-5% overhead).
 
 **Trade-off:**
-- ✅ 95-98% space savings vs. verbatim
-- ✅ Maintains holographic properties (search, similarity)
-- ❌ Slightly slower decode (correction application)
+-  95-98% space savings vs. verbatim
+-  Maintains holographic properties (search, similarity)
+-  Slightly slower decode (correction application)
 
 **Conclusion:** Correction layer provides best of both worlds - holographic encoding + bit-perfect guarantee.
 
@@ -385,10 +385,10 @@ assert_eq!(parity, reconstructed_parity, "Corruption detected");
 **EmbrFS Approach:** Adaptively choose best correction type per chunk.
 
 **Trade-off:**
-- ✅ 2-3x better space efficiency
-- ✅ Handles diverse data types well
-- ❌ More complex implementation
-- ❌ Slightly slower selection algorithm
+-  2-3x better space efficiency
+-  Handles diverse data types well
+-  More complex implementation
+-  Slightly slower selection algorithm
 
 **Conclusion:** Complexity is justified by significant space savings.
 
@@ -399,10 +399,10 @@ assert_eq!(parity, reconstructed_parity, "Corruption detected");
 **EmbrFS Approach:** Always verify reconstructed data matches expected hash.
 
 **Trade-off:**
-- ✅ Catches corrupted engrams
-- ✅ Catches bugs in correction logic
-- ✅ Provides strong integrity guarantee
-- ❌ ~1% slower decode (hash computation)
+-  Catches corrupted engrams
+-  Catches bugs in correction logic
+-  Provides strong integrity guarantee
+-  ~1% slower decode (hash computation)
 
 **Conclusion:** Security and correctness justify minimal overhead.
 
@@ -470,14 +470,14 @@ assert_eq!(parity, reconstructed_parity, "Corruption detected");
 ### Integrity Guarantees
 
 **What EmbrFS Guarantees:**
-- ✅ Bit-perfect reconstruction (always)
-- ✅ Detection of corrupted engrams (hash mismatch)
-- ✅ Detection of incomplete corrections (parity check)
+-  Bit-perfect reconstruction (always)
+-  Detection of corrupted engrams (hash mismatch)
+-  Detection of incomplete corrections (parity check)
 
 **What EmbrFS Does NOT Guarantee:**
-- ❌ Confidentiality (engrams are plaintext)
-- ❌ Authenticity (no signing)
-- ❌ Freshness (no timestamps)
+-  Confidentiality (engrams are plaintext)
+-  Authenticity (no signing)
+-  Freshness (no timestamps)
 
 ## Testing & Validation
 

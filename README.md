@@ -25,16 +25,16 @@ EmbrFS (Embeddenator Filesystem) is a novel approach to filesystem storage that 
 ### Realistic Scope & Limitations
 
 **What EmbrFS IS:**
-- ✅ A research-grade holographic encoding system for filesystems
-- ✅ A read-only FUSE filesystem for browsing encoded directory trees
-- ✅ An experimental VSA application demonstrating bit-perfect reconstruction
-- ✅ A foundation for exploring holographic storage and retrieval patterns
+-  A research-grade holographic encoding system for filesystems
+-  A read-only FUSE filesystem for browsing encoded directory trees
+-  An experimental VSA application demonstrating bit-perfect reconstruction
+-  A foundation for exploring holographic storage and retrieval patterns
 
 **What EmbrFS IS NOT:**
-- ❌ A replacement for production filesystems (ext4, btrfs, ZFS)
-- ❌ A compression tool (overhead varies, typically 0-5% for correction layer)
-- ❌ A writable filesystem (holographic engrams are immutable snapshots)
-- ❌ A distributed storage system (single-machine only)
+-  A replacement for production filesystems (ext4, btrfs, ZFS)
+-  A compression tool (overhead varies, typically 0-5% for correction layer)
+-  A writable filesystem (holographic engrams are immutable snapshots)
+-  A distributed storage system (single-machine only)
 
 **Current Limitations:**
 - Read-only FUSE operations (by design - engrams are immutable)
@@ -216,12 +216,12 @@ embeddenator-fs update compact -e data.engram -v
 
 ### CLI Features
 
-- ✅ User-friendly progress indicators
-- ✅ Verbose mode for detailed output
-- ✅ Helpful error messages
-- ✅ Performance statistics
-- ✅ Bit-perfect verification
-- ✅ Incremental operations
+-  User-friendly progress indicators
+-  Verbose mode for detailed output
+-  Helpful error messages
+-  Performance statistics
+-  Bit-perfect verification
+-  Incremental operations
 
 ## Examples
 
