@@ -8,6 +8,8 @@
 //! - Creating files
 //! - Deleting files
 //! - Truncating files
+//! - Symbolic links (readlink, symlink)
+//! - Device nodes (mknod)
 //! - All with optimistic locking and version tracking
 
 use crate::versioned_embrfs::VersionedEmbrFS;
@@ -44,6 +46,9 @@ pub struct VersionedFUSE {
     /// Directory structure (parent_ino -> child entries)
     directories: Arc<RwLock<HashMap<Ino, Vec<DirEntry>>>>,
 
+    /// Symlink targets (ino -> target)
+    symlinks: Arc<RwLock<HashMap<Ino, String>>>,
+
     /// Next available inode number
     next_ino: Arc<RwLock<Ino>>,
 
@@ -69,6 +74,7 @@ impl VersionedFUSE {
             inode_paths: Arc::new(RwLock::new(HashMap::new())),
             path_inodes: Arc::new(RwLock::new(HashMap::new())),
             directories: Arc::new(RwLock::new(HashMap::new())),
+            symlinks: Arc::new(RwLock::new(HashMap::new())),
             next_ino: Arc::new(RwLock::new(ROOT_INO + 1)),
             next_fh: Arc::new(RwLock::new(1)),
             open_files: Arc::new(RwLock::new(HashMap::new())),
@@ -674,6 +680,106 @@ impl Filesystem for VersionedFUSE {
             let attr = self.make_file_attr(ino, &path);
             reply.attr(&self.attr_ttl, &attr.into());
         }
+    }
+
+    fn readlink(&mut self, _req: &Request, ino: u64, reply: ReplyData) {
+        let symlinks = self.symlinks.read().unwrap();
+        match symlinks.get(&ino) {
+            Some(target) => {
+                reply.data(target.as_bytes());
+            }
+            None => {
+                reply.error(libc::EINVAL); // Not a symlink
+            }
+        }
+    }
+
+    fn symlink(
+        &mut self,
+        _req: &Request,
+        parent: u64,
+        link_name: &OsStr,
+        target: &std::path::Path,
+        reply: ReplyEntry,
+    ) {
+        let link_name_str = match link_name.to_str() {
+            Some(s) => s,
+            None => {
+                reply.error(libc::EINVAL);
+                return;
+            }
+        };
+
+        let target_str = match target.to_str() {
+            Some(s) => s.to_string(),
+            None => {
+                reply.error(libc::EINVAL);
+                return;
+            }
+        };
+
+        // Get parent path
+        let parent_path = match self.get_path(parent) {
+            Some(p) => p,
+            None => {
+                reply.error(libc::ENOENT);
+                return;
+            }
+        };
+
+        // Construct symlink path
+        let symlink_path = if parent_path == "/" {
+            format!("/{}", link_name_str)
+        } else {
+            format!("{}/{}", parent_path, link_name_str)
+        };
+
+        // Allocate inode
+        let mut next_ino = self.next_ino.write().unwrap();
+        let ino = *next_ino;
+        *next_ino += 1;
+        drop(next_ino);
+
+        // Register symlink
+        let mut path_inodes = self.path_inodes.write().unwrap();
+        let mut inode_paths = self.inode_paths.write().unwrap();
+        let mut symlinks = self.symlinks.write().unwrap();
+        let mut directories = self.directories.write().unwrap();
+
+        path_inodes.insert(symlink_path.clone(), ino);
+        inode_paths.insert(ino, symlink_path);
+        symlinks.insert(ino, target_str.clone());
+
+        // Add to parent directory
+        if let Some(parent_entries) = directories.get_mut(&parent) {
+            parent_entries.push(DirEntry {
+                ino,
+                name: link_name_str.to_string(),
+                kind: FileKind::Symlink,
+            });
+        }
+
+        // Create attributes
+        let now = SystemTime::now();
+        let attr = FileAttr {
+            ino,
+            size: target_str.len() as u64,
+            blocks: 0,
+            atime: now,
+            mtime: now,
+            ctime: now,
+            crtime: now,
+            kind: FileKind::Symlink,
+            perm: 0o777,
+            nlink: 1,
+            uid: 1000,
+            gid: 1000,
+            rdev: 0,
+            blksize: 4096,
+            flags: 0,
+        };
+
+        reply.entry(&self.entry_ttl, &attr.into(), 0);
     }
 }
 

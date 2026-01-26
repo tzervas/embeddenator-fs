@@ -162,14 +162,25 @@ impl From<FileAttr> for fuser::FileAttr {
 }
 
 /// File type
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum FileKind {
     /// Directory
     Directory,
     /// Regular file
+    #[default]
     RegularFile,
     /// Symbolic link
     Symlink,
+    /// Hard link (treated as regular file for FUSE, but tracked separately)
+    Hardlink,
+    /// Character device
+    CharDevice,
+    /// Block device
+    BlockDevice,
+    /// FIFO (named pipe)
+    Fifo,
+    /// Unix socket
+    Socket,
 }
 
 #[cfg(feature = "fuse")]
@@ -179,6 +190,11 @@ impl From<FileKind> for fuser::FileType {
             FileKind::Directory => fuser::FileType::Directory,
             FileKind::RegularFile => fuser::FileType::RegularFile,
             FileKind::Symlink => fuser::FileType::Symlink,
+            FileKind::Hardlink => fuser::FileType::RegularFile, // Hardlinks appear as regular files
+            FileKind::CharDevice => fuser::FileType::CharDevice,
+            FileKind::BlockDevice => fuser::FileType::BlockDevice,
+            FileKind::Fifo => fuser::FileType::NamedPipe,
+            FileKind::Socket => fuser::FileType::Socket,
         }
     }
 }
@@ -194,6 +210,13 @@ pub struct DirEntry {
     pub kind: FileKind,
 }
 
+/// Symlink data storage
+#[derive(Clone, Debug)]
+pub struct SymlinkEntry {
+    /// Symlink target path
+    pub target: String,
+}
+
 /// Cached file data for read operations
 #[derive(Clone)]
 pub struct CachedFile {
@@ -201,6 +224,15 @@ pub struct CachedFile {
     pub data: Vec<u8>,
     /// File attributes
     pub attr: FileAttr,
+}
+
+/// Device node metadata (for char/block devices)
+#[derive(Clone, Debug)]
+pub struct DeviceNode {
+    /// Major device number
+    pub major: u32,
+    /// Minor device number
+    pub minor: u32,
 }
 
 /// The EngramFS FUSE filesystem implementation
@@ -223,6 +255,12 @@ pub struct EngramFS {
 
     /// Cached file data (ino -> data)
     file_cache: Arc<RwLock<HashMap<Ino, CachedFile>>>,
+
+    /// Symlink targets (ino -> target path)
+    symlinks: Arc<RwLock<HashMap<Ino, String>>>,
+
+    /// Device nodes (ino -> major/minor)
+    devices: Arc<RwLock<HashMap<Ino, DeviceNode>>>,
 
     /// Next available inode number
     next_ino: Arc<RwLock<Ino>>,
@@ -250,6 +288,8 @@ impl EngramFS {
             path_inodes: Arc::new(RwLock::new(HashMap::new())),
             directories: Arc::new(RwLock::new(HashMap::new())),
             file_cache: Arc::new(RwLock::new(HashMap::new())),
+            symlinks: Arc::new(RwLock::new(HashMap::new())),
+            devices: Arc::new(RwLock::new(HashMap::new())),
             next_ino: Arc::new(RwLock::new(2)), // Start after root
             read_only,
             attr_ttl: Duration::from_secs(1),
@@ -565,6 +605,285 @@ impl EngramFS {
     pub fn entry_ttl(&self) -> Duration {
         self.entry_ttl
     }
+
+    /// Add a symbolic link to the filesystem
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Absolute path within the filesystem (e.g., "/lib/libc.so.6")
+    /// * `target` - The symlink target path (can be relative or absolute)
+    ///
+    /// # Returns
+    ///
+    /// The assigned inode number for the new symlink
+    pub fn add_symlink(&self, path: &str, target: String) -> Result<Ino, &'static str> {
+        let path = normalize_path(path);
+
+        // Check if already exists
+        let path_inodes = self.path_inodes.read().unwrap_or_else(|poisoned| {
+            eprintln!("WARNING: path_inodes lock poisoned in add_symlink, recovering...");
+            poisoned.into_inner()
+        });
+        if path_inodes.contains_key(&path) {
+            return Err("Symlink already exists");
+        }
+        drop(path_inodes);
+
+        // Ensure parent directory exists
+        let parent_path = parent_path(&path).ok_or("Invalid path")?;
+        let parent_ino = self.ensure_directory(&parent_path)?;
+
+        // Create symlink
+        let ino = self.alloc_ino()?;
+        let size = target.len() as u64; // Symlink size is the target path length
+
+        let attr = FileAttr {
+            ino,
+            size,
+            blocks: 0,
+            kind: FileKind::Symlink,
+            perm: 0o777, // Symlinks typically have 777 permissions
+            nlink: 1,
+            ..Default::default()
+        };
+
+        // Store symlink
+        self.inodes
+            .write()
+            .map_err(|_| "Inodes lock poisoned")?
+            .insert(ino, attr);
+        self.inode_paths
+            .write()
+            .map_err(|_| "Inode paths lock poisoned")?
+            .insert(ino, path.clone());
+        self.path_inodes
+            .write()
+            .map_err(|_| "Path inodes lock poisoned")?
+            .insert(path.clone(), ino);
+        self.symlinks
+            .write()
+            .map_err(|_| "Symlinks lock poisoned")?
+            .insert(ino, target);
+
+        // Add to parent directory
+        let filename = filename(&path).ok_or("Invalid filename")?;
+        self.directories
+            .write()
+            .map_err(|_| "Directories lock poisoned")?
+            .get_mut(&parent_ino)
+            .ok_or("Parent directory not found")?
+            .push(DirEntry {
+                ino,
+                name: filename.to_string(),
+                kind: FileKind::Symlink,
+            });
+
+        Ok(ino)
+    }
+
+    /// Add a device node to the filesystem (Option C: store device data)
+    ///
+    /// # Arguments
+    ///
+    /// * `path` - Absolute path within the filesystem (e.g., "/dev/null")
+    /// * `is_char` - true for character device, false for block device
+    /// * `major` - Major device number
+    /// * `minor` - Minor device number
+    /// * `data` - Device data content (Option C encoding)
+    ///
+    /// # Returns
+    ///
+    /// The assigned inode number for the new device
+    pub fn add_device(
+        &self,
+        path: &str,
+        is_char: bool,
+        major: u32,
+        minor: u32,
+        data: Vec<u8>,
+    ) -> Result<Ino, &'static str> {
+        let path = normalize_path(path);
+
+        // Check if already exists
+        let path_inodes = self.path_inodes.read().unwrap_or_else(|poisoned| {
+            eprintln!("WARNING: path_inodes lock poisoned in add_device, recovering...");
+            poisoned.into_inner()
+        });
+        if path_inodes.contains_key(&path) {
+            return Err("Device already exists");
+        }
+        drop(path_inodes);
+
+        // Ensure parent directory exists
+        let parent_path = parent_path(&path).ok_or("Invalid path")?;
+        let parent_ino = self.ensure_directory(&parent_path)?;
+
+        // Create device node
+        let ino = self.alloc_ino()?;
+        let size = data.len() as u64;
+        let kind = if is_char {
+            FileKind::CharDevice
+        } else {
+            FileKind::BlockDevice
+        };
+
+        let attr = FileAttr {
+            ino,
+            size,
+            blocks: size.div_ceil(512),
+            kind,
+            perm: 0o666,
+            nlink: 1,
+            rdev: (major << 8) | minor, // Encode major/minor in rdev
+            ..Default::default()
+        };
+
+        // Store device node
+        self.inodes
+            .write()
+            .map_err(|_| "Inodes lock poisoned")?
+            .insert(ino, attr.clone());
+        self.inode_paths
+            .write()
+            .map_err(|_| "Inode paths lock poisoned")?
+            .insert(ino, path.clone());
+        self.path_inodes
+            .write()
+            .map_err(|_| "Path inodes lock poisoned")?
+            .insert(path.clone(), ino);
+        self.devices
+            .write()
+            .map_err(|_| "Devices lock poisoned")?
+            .insert(ino, DeviceNode { major, minor });
+
+        // Store device data (Option C)
+        self.file_cache
+            .write()
+            .map_err(|_| "File cache lock poisoned")?
+            .insert(ino, CachedFile { data, attr });
+
+        // Add to parent directory
+        let filename = filename(&path).ok_or("Invalid filename")?;
+        self.directories
+            .write()
+            .map_err(|_| "Directories lock poisoned")?
+            .get_mut(&parent_ino)
+            .ok_or("Parent directory not found")?
+            .push(DirEntry {
+                ino,
+                name: filename.to_string(),
+                kind,
+            });
+
+        Ok(ino)
+    }
+
+    /// Add a FIFO (named pipe) to the filesystem
+    pub fn add_fifo(&self, path: &str) -> Result<Ino, &'static str> {
+        self.add_special_file(path, FileKind::Fifo)
+    }
+
+    /// Add a Unix socket to the filesystem
+    pub fn add_socket(&self, path: &str) -> Result<Ino, &'static str> {
+        self.add_special_file(path, FileKind::Socket)
+    }
+
+    /// Internal helper to add special files (FIFO, socket)
+    fn add_special_file(&self, path: &str, kind: FileKind) -> Result<Ino, &'static str> {
+        let path = normalize_path(path);
+
+        // Check if already exists
+        let path_inodes = self.path_inodes.read().unwrap_or_else(|poisoned| {
+            eprintln!("WARNING: path_inodes lock poisoned in add_special_file, recovering...");
+            poisoned.into_inner()
+        });
+        if path_inodes.contains_key(&path) {
+            return Err("Special file already exists");
+        }
+        drop(path_inodes);
+
+        // Ensure parent directory exists
+        let parent_path = parent_path(&path).ok_or("Invalid path")?;
+        let parent_ino = self.ensure_directory(&parent_path)?;
+
+        // Create special file
+        let ino = self.alloc_ino()?;
+
+        let attr = FileAttr {
+            ino,
+            size: 0,
+            blocks: 0,
+            kind,
+            perm: 0o666,
+            nlink: 1,
+            ..Default::default()
+        };
+
+        // Store special file
+        self.inodes
+            .write()
+            .map_err(|_| "Inodes lock poisoned")?
+            .insert(ino, attr);
+        self.inode_paths
+            .write()
+            .map_err(|_| "Inode paths lock poisoned")?
+            .insert(ino, path.clone());
+        self.path_inodes
+            .write()
+            .map_err(|_| "Path inodes lock poisoned")?
+            .insert(path.clone(), ino);
+
+        // Add to parent directory
+        let filename = filename(&path).ok_or("Invalid filename")?;
+        self.directories
+            .write()
+            .map_err(|_| "Directories lock poisoned")?
+            .get_mut(&parent_ino)
+            .ok_or("Parent directory not found")?
+            .push(DirEntry {
+                ino,
+                name: filename.to_string(),
+                kind,
+            });
+
+        Ok(ino)
+    }
+
+    /// Read symlink target
+    pub fn read_symlink(&self, ino: Ino) -> Option<String> {
+        let symlinks = self.symlinks.read().unwrap_or_else(|poisoned| {
+            eprintln!("WARNING: symlinks lock poisoned in read_symlink, recovering...");
+            poisoned.into_inner()
+        });
+        symlinks.get(&ino).cloned()
+    }
+
+    /// Get device node info
+    pub fn get_device(&self, ino: Ino) -> Option<DeviceNode> {
+        let devices = self.devices.read().unwrap_or_else(|poisoned| {
+            eprintln!("WARNING: devices lock poisoned in get_device, recovering...");
+            poisoned.into_inner()
+        });
+        devices.get(&ino).cloned()
+    }
+
+    /// Get total number of symlinks
+    pub fn symlink_count(&self) -> usize {
+        let symlinks = self.symlinks.read().unwrap_or_else(|poisoned| {
+            eprintln!("WARNING: symlinks lock poisoned in symlink_count, recovering...");
+            poisoned.into_inner()
+        });
+        symlinks.len()
+    }
+
+    /// Get total number of device nodes
+    pub fn device_count(&self) -> usize {
+        let devices = self.devices.read().unwrap_or_else(|poisoned| {
+            eprintln!("WARNING: devices lock poisoned in device_count, recovering...");
+            poisoned.into_inner()
+        });
+        devices.len()
+    }
 }
 
 // =============================================================================
@@ -805,16 +1124,169 @@ impl fuser::Filesystem for EngramFS {
 
     /// Read symbolic link target
     fn readlink(&mut self, _req: &fuser::Request<'_>, ino: u64, reply: fuser::ReplyData) {
-        // We don't support symlinks yet
         match self.get_attr(ino) {
             Some(attr) if attr.kind == FileKind::Symlink => {
-                reply.error(libc::ENOSYS); // Not implemented
+                // Look up the symlink target
+                match self.read_symlink(ino) {
+                    Some(target) => {
+                        reply.data(target.as_bytes());
+                    }
+                    None => {
+                        eprintln!("WARNING: Symlink {} has no target stored", ino);
+                        reply.error(libc::EIO);
+                    }
+                }
             }
             Some(_) => {
                 reply.error(libc::EINVAL); // Not a symlink
             }
             None => {
                 reply.error(libc::ENOENT);
+            }
+        }
+    }
+
+    /// Create a symbolic link
+    fn symlink(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        parent: u64,
+        link_name: &OsStr,
+        target: &std::path::Path,
+        reply: fuser::ReplyEntry,
+    ) {
+        if self.read_only {
+            reply.error(libc::EROFS);
+            return;
+        }
+
+        let link_name = match link_name.to_str() {
+            Some(n) => n,
+            None => {
+                reply.error(libc::EINVAL);
+                return;
+            }
+        };
+
+        let target = match target.to_str() {
+            Some(t) => t.to_string(),
+            None => {
+                reply.error(libc::EINVAL);
+                return;
+            }
+        };
+
+        // Get parent path
+        let parent_path_str = match self.inode_paths.read() {
+            Ok(paths) => match paths.get(&parent) {
+                Some(p) => p.clone(),
+                None => {
+                    reply.error(libc::ENOENT);
+                    return;
+                }
+            },
+            Err(_) => {
+                reply.error(libc::EIO);
+                return;
+            }
+        };
+
+        // Construct symlink path
+        let symlink_path = if parent_path_str == "/" {
+            format!("/{}", link_name)
+        } else {
+            format!("{}/{}", parent_path_str, link_name)
+        };
+
+        // Create the symlink
+        match self.add_symlink(&symlink_path, target) {
+            Ok(ino) => {
+                if let Some(attr) = self.get_attr(ino) {
+                    let fuser_attr: fuser::FileAttr = attr.into();
+                    reply.entry(&self.entry_ttl, &fuser_attr, 0);
+                } else {
+                    reply.error(libc::EIO);
+                }
+            }
+            Err(_) => {
+                reply.error(libc::EIO);
+            }
+        }
+    }
+
+    /// Create a special device node (mknod)
+    fn mknod(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        _umask: u32,
+        rdev: u32,
+        reply: fuser::ReplyEntry,
+    ) {
+        if self.read_only {
+            reply.error(libc::EROFS);
+            return;
+        }
+
+        let name = match name.to_str() {
+            Some(n) => n,
+            None => {
+                reply.error(libc::EINVAL);
+                return;
+            }
+        };
+
+        // Get parent path
+        let parent_path_str = match self.inode_paths.read() {
+            Ok(paths) => match paths.get(&parent) {
+                Some(p) => p.clone(),
+                None => {
+                    reply.error(libc::ENOENT);
+                    return;
+                }
+            },
+            Err(_) => {
+                reply.error(libc::EIO);
+                return;
+            }
+        };
+
+        // Construct file path
+        let file_path = if parent_path_str == "/" {
+            format!("/{}", name)
+        } else {
+            format!("{}/{}", parent_path_str, name)
+        };
+
+        // Determine file type from mode
+        let file_type = mode & libc::S_IFMT;
+        let major = ((rdev >> 8) & 0xff) as u32;
+        let minor = (rdev & 0xff) as u32;
+
+        let result = match file_type {
+            libc::S_IFCHR => self.add_device(&file_path, true, major, minor, Vec::new()),
+            libc::S_IFBLK => self.add_device(&file_path, false, major, minor, Vec::new()),
+            libc::S_IFIFO => self.add_fifo(&file_path),
+            libc::S_IFSOCK => self.add_socket(&file_path),
+            _ => {
+                reply.error(libc::EINVAL);
+                return;
+            }
+        };
+
+        match result {
+            Ok(ino) => {
+                if let Some(attr) = self.get_attr(ino) {
+                    let fuser_attr: fuser::FileAttr = attr.into();
+                    reply.entry(&self.entry_ttl, &fuser_attr, 0);
+                } else {
+                    reply.error(libc::EIO);
+                }
+            }
+            Err(_) => {
+                reply.error(libc::EIO);
             }
         }
     }

@@ -1,36 +1,115 @@
 //! Hybrid Journaling System for Durable Writes
+//! ============================================
 //!
 //! This module provides a combination of simple fsync barriers for atomic single-file
 //! operations and a lightweight Write-Ahead Log (WAL) for complex multi-file transactions.
 //!
-//! ## Design Philosophy
+//! # Why a Journal?
 //!
-//! The journaling system is optimized for the engram use case:
+//! Filesystems need journals to survive crashes. Without one, a power failure during
+//! a write operation can leave the filesystem in an inconsistent state:
 //!
-//! - **Simple writes** (single file, < 64KB): Direct fsync with barrier
-//! - **Complex writes** (multi-file, large data): WAL with group commit
-//! - **Recovery**: WAL replay on mount, then verify engram integrity
+//! - **Torn writes**: Half-written data appears as corruption
+//! - **Lost updates**: Data in memory never reaches disk
+//! - **Dangling references**: Metadata points to freed blocks
+//! - **Orphaned data**: Blocks allocated but not referenced
 //!
-//! ## Journal Record Format
+//! The journal ensures that either:
+//! 1. An operation completes fully and is recoverable, OR
+//! 2. An operation is completely rolled back (never partially applied)
+//!
+//! This is the "A" in ACID: Atomicity.
+//!
+//! # Why Hybrid (fsync + WAL)?
+//!
+//! A pure WAL approach (like SQLite or PostgreSQL) adds latency to every write.
+//! A pure fsync approach can't handle multi-file transactions atomically.
+//!
+//! We use a **hybrid** approach optimized for the engram use case:
+//!
+//! | Operation Type | Strategy | Why |
+//! |----------------|----------|-----|
+//! | Single file < 64KB | fsync barrier | Simple, fast, no journal overhead |
+//! | Single file ≥ 64KB | WAL | Allows streaming writes + recovery |
+//! | Multi-file transaction | WAL | Atomic commit of all changes |
+//! | Metadata-only change | WAL | Small payload, fast |
+//!
+//! This hybrid approach gives us:
+//! - **Fast common case**: Single small files use simple fsync (~1ms)
+//! - **Safe complex case**: Multi-file ops get full WAL protection
+//! - **Bounded recovery time**: Journal is checkpointed regularly
+//!
+//! # Why These Durability Modes?
+//!
+//! Different users have different needs:
+//!
+//! ## Immediate Mode
+//! - **Use when**: Data loss is unacceptable (financial, medical)
+//! - **Cost**: ~5-10ms per write (SSD), ~15-30ms (HDD)
+//! - **Guarantee**: Committed = on persistent storage
+//!
+//! ## GroupCommit Mode (Default)
+//! - **Use when**: Balance of safety and performance
+//! - **Cost**: ~5ms batch latency, amortized across many writes
+//! - **Guarantee**: Up to 5ms of data loss on crash
+//! - **Why default**: Most users want good performance with reasonable safety
+//!
+//! ## Relaxed Mode  
+//! - **Use when**: Performance critical, data is regenerable
+//! - **Cost**: Near-zero latency
+//! - **Guarantee**: OS decides when to flush (could be 30+ seconds)
+//! - **Risk**: Significant data loss on crash
+//!
+//! # Journal Record Format
+//!
+//! Why this specific format:
 //!
 //! ```text
 //! ┌────────────────────────────────────────────────────────────┐
 //! │ Record Header (32 bytes)                                   │
 //! ├────────────────────────────────────────────────────────────┤
 //! │ magic: u32          = 0x454D4252 ("EMBR")                  │
+//! │   └─ Why: Detect corruption/wrong file immediately        │
 //! │ version: u16        = 1                                    │
+//! │   └─ Why: Allow format evolution without breaking old files│
 //! │ flags: u16          = (committed | checkpointed | ...)     │
+//! │   └─ Why: Track transaction state for recovery            │
 //! │ txn_id: u64         = transaction ID                       │
+//! │   └─ Why: Ordering for replay, debugging                  │
 //! │ timestamp: u64      = Unix timestamp (nanos)               │
+//! │   └─ Why: Debugging, determining recovery point           │
 //! │ payload_len: u32    = length of payload                    │
+//! │   └─ Why: Know how much to read without parsing payload   │
 //! │ checksum: u32       = CRC32 of header + payload            │
+//! │   └─ Why: Detect corruption before acting on bad data     │
 //! ├────────────────────────────────────────────────────────────┤
 //! │ Payload (variable)                                         │
 //! │ - Serialized operations                                    │
+//! │   └─ Why: Variable length allows efficient small writes   │
 //! └────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! ## Durability Modes
+//! # Why 32-byte Header?
+//!
+//! - **Alignment**: 32 bytes aligns to cache lines on most CPUs
+//! - **Atomic read**: Can read header in single I/O operation
+//! - **Space efficient**: Minimal overhead per record
+//! - **Room for growth**: Version field allows adding fields later
+//!
+//! # Recovery Process
+//!
+//! On mount after crash:
+//!
+//! 1. **Scan journal** from start to end
+//! 2. **Verify checksums** - skip corrupted records
+//! 3. **Find committed transactions** - ignore pending/aborted
+//! 4. **Replay in order** - apply operations to engram
+//! 5. **Verify engram** - check manifest and chunk integrity
+//! 6. **Checkpoint journal** - truncate replayed records
+//!
+//! Recovery is O(journal_size), typically <1 second for <100MB journal.
+//!
+//! # Durability Modes
 //!
 //! - `Immediate`: fsync after every write (safest, slowest)
 //! - `GroupCommit`: batch fsync every N ms or M operations

@@ -13,6 +13,11 @@ categories = ["filesystem"]
 [features]
 default = []
 fuse = ["fuser"]
+# Disk image support for VM encoding (QCOW2, raw images, partition tables)
+# Requires tokio runtime and optional io_uring for maximum performance on Linux
+disk-image = ["qcow2-rs", "gpt", "mbrman", "ext4", "tokio", "tokio-uring"]
+# Disk image support without io_uring (for non-Linux or older kernels)
+disk-image-portable = ["qcow2-rs", "gpt", "mbrman", "ext4", "tokio"]
 
 [dependencies]
 # FUSE optional feature
@@ -25,6 +30,38 @@ walkdir = ">=2.3, <3.0"
 arc-swap = ">=1.6, <2.0"
 rustc-hash = ">=2.0, <3.0"
 sha2 = ">=0.10, <1.0"
+
+# Disk image support (optional)
+# qcow2-rs: QCOW2 virtual disk format used by QEMU/KVM
+#   - Why: Enables direct encoding of VM disk images without mounting
+#   - Supports backing files, compression, and snapshots
+#   - Async I/O via tokio-uring for maximum throughput
+qcow2-rs = { version = "0.1", optional = true }
+
+# gpt: GUID Partition Table parsing and manipulation
+#   - Why: Modern partition scheme used by UEFI systems and large disks
+#   - Pure Rust implementation, no C dependencies
+gpt = { version = "4.1", optional = true }
+
+# mbrman: Master Boot Record partition table handling
+#   - Why: Legacy partition scheme still common in VMs and embedded systems
+#   - Supports logical volumes and Extended Boot Records (EBR)
+mbrman = { version = "0.6", optional = true }
+
+# ext4: Read-only ext4 filesystem traversal
+#   - Why: Most common Linux filesystem; needed to traverse VM disk contents
+#   - Read-only is sufficient for encoding (we don't modify source images)
+ext4 = { version = "0.9", optional = true }
+
+# Async runtime (required for disk-image features)
+# tokio: Industry-standard async runtime for Rust
+#   - Why: Required by qcow2-rs, provides consistent async API across the crate
+tokio = { version = "1.0", features = ["rt-multi-thread", "fs", "io-util", "sync"], optional = true }
+
+# tokio-uring: io_uring backend for tokio on Linux
+#   - Why: 2-3x faster I/O for large disk operations via kernel ring buffer
+#   - Falls back gracefully on non-Linux or older kernels
+tokio-uring = { version = "0.5", optional = true }
 
 # Core embeddenator dependencies (path for dev, semver for publish)
 embeddenator-vsa = { path = "../embeddenator-vsa", version = ">=0.21.0, <1.0.0" }
@@ -43,6 +80,9 @@ path = "src/bin/embeddenator-fs.rs"
 proptest = ">=1.0, <2.0"
 tempfile = ">=3.8, <4.0"
 criterion = { version = ">=0.5, <1.0", features = ["html_reports"] }
+dirs = "5.0"
+serde_json = "1.0"
+serde = { version = "1.0", features = ["derive"] }
 
 [[bench]]
 name = "filesystem_benchmarks"
