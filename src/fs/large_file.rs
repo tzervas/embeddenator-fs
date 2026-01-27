@@ -95,7 +95,7 @@ impl Default for LargeFileConfig {
             max_bundle_size: MAX_BUNDLE_CAPACITY,
             hierarchical: true,
             correction_threshold: 0.1,
-            parallel: false,
+            parallel: true,
         }
     }
 }
