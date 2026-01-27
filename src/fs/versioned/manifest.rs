@@ -105,7 +105,7 @@
 //! The path index exists because directory listing is O(n) without it.
 //! With the index, listing a directory is O(children) regardless of total files.
 
-use super::types::{ChunkId, VersionMismatch, VersionedResult};
+use super::types::{ChunkId, ChunkOffset, ChunkRange, VersionMismatch, VersionedResult};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -256,6 +256,13 @@ pub struct VersionedFileEntry {
     /// List of chunk IDs that make up this file
     pub chunks: Vec<ChunkId>,
 
+    /// Byte-offset index for range queries (optional for backward compatibility)
+    ///
+    /// When present, enables O(log n) byte-offset lookups instead of sequential scanning.
+    /// Each entry maps a chunk ID to its byte offset within the file.
+    /// If None, offsets can be computed from chunk sizes (requires chunk_store access).
+    pub chunk_offsets: Option<Vec<ChunkOffset>>,
+
     /// Is this file marked as deleted? (soft delete)
     pub deleted: bool,
 
@@ -296,6 +303,7 @@ impl VersionedFileEntry {
             is_text,
             size,
             chunks,
+            chunk_offsets: None,
             deleted: false,
             compression_codec: None,
             uncompressed_size: None,
@@ -326,6 +334,7 @@ impl VersionedFileEntry {
             is_text,
             size,
             chunks,
+            chunk_offsets: None,
             deleted: false,
             compression_codec: None,
             uncompressed_size: None,
@@ -349,6 +358,7 @@ impl VersionedFileEntry {
             is_text: false,
             size: 0,
             chunks: Vec::new(),
+            chunk_offsets: None,
             deleted: false,
             compression_codec: None,
             uncompressed_size: None,
@@ -372,6 +382,7 @@ impl VersionedFileEntry {
             is_text: false,
             size: 0,
             chunks: Vec::new(),
+            chunk_offsets: None,
             deleted: false,
             compression_codec: None,
             uncompressed_size: None,
@@ -420,6 +431,7 @@ impl VersionedFileEntry {
             is_text: false,
             size: 0,
             chunks: Vec::new(),
+            chunk_offsets: None,
             deleted: false,
             compression_codec: None,
             uncompressed_size: None,
@@ -458,6 +470,7 @@ impl VersionedFileEntry {
             is_text: false,
             size,
             chunks,
+            chunk_offsets: None,
             deleted: false,
             compression_codec: None,
             uncompressed_size: None,
@@ -496,6 +509,7 @@ impl VersionedFileEntry {
             is_text: false,
             size: compressed_size,
             chunks,
+            chunk_offsets: None,
             deleted: false,
             compression_codec: Some(compression_codec),
             uncompressed_size: Some(uncompressed_size),
@@ -519,6 +533,7 @@ impl VersionedFileEntry {
             is_text: false,
             size: 0,
             chunks: Vec::new(),
+            chunk_offsets: None,
             deleted: false,
             compression_codec: None,
             uncompressed_size: None,
@@ -549,6 +564,7 @@ impl VersionedFileEntry {
             is_text,
             size: compressed_size,
             chunks,
+            chunk_offsets: None,
             deleted: false,
             compression_codec: Some(compression_codec),
             uncompressed_size: Some(uncompressed_size),
@@ -580,6 +596,7 @@ impl VersionedFileEntry {
             is_text,
             size: compressed_size,
             chunks,
+            chunk_offsets: None,
             deleted: false,
             compression_codec: Some(compression_codec),
             uncompressed_size: Some(uncompressed_size),
@@ -602,6 +619,7 @@ impl VersionedFileEntry {
             is_text: self.is_text,
             size: new_size,
             chunks: new_chunks,
+            chunk_offsets: None, // Will be recomputed if needed
             deleted: false,
             compression_codec: self.compression_codec,
             uncompressed_size: self.uncompressed_size,
@@ -630,6 +648,7 @@ impl VersionedFileEntry {
             is_text: self.is_text,
             size: compressed_size,
             chunks: new_chunks,
+            chunk_offsets: None, // Will be recomputed if needed
             deleted: false,
             compression_codec: Some(compression_codec),
             uncompressed_size: Some(uncompressed_size),
@@ -668,6 +687,7 @@ impl VersionedFileEntry {
             is_text,
             size,
             chunks,
+            chunk_offsets: None,
             deleted: false,
             compression_codec: None,
             uncompressed_size: None,
@@ -686,6 +706,170 @@ impl VersionedFileEntry {
     /// Check if this entry is metadata-only (no data to encode)
     pub fn is_metadata_only(&self) -> bool {
         self.file_type.is_metadata_only()
+    }
+
+    // =========================================================================
+    // Range Query Support
+    // =========================================================================
+
+    /// Build the chunk offset index from chunk sizes
+    ///
+    /// This populates `chunk_offsets` for O(log n) byte-offset lookups.
+    /// Call this after creating chunks when you know the sizes.
+    ///
+    /// # Arguments
+    /// * `chunk_sizes` - The decoded (original) size of each chunk in order
+    pub fn build_offset_index(&mut self, chunk_sizes: &[usize]) {
+        assert_eq!(
+            chunk_sizes.len(),
+            self.chunks.len(),
+            "chunk_sizes must match chunks length"
+        );
+
+        let mut offset = 0;
+        let offsets: Vec<ChunkOffset> = self
+            .chunks
+            .iter()
+            .zip(chunk_sizes.iter())
+            .map(|(&chunk_id, &size)| {
+                let co = ChunkOffset::new(chunk_id, offset, size);
+                offset += size;
+                co
+            })
+            .collect();
+
+        self.chunk_offsets = Some(offsets);
+    }
+
+    /// Create a new file entry with pre-computed chunk offsets
+    ///
+    /// This is the preferred constructor when chunk sizes are known at creation time.
+    pub fn new_with_offsets(
+        path: String,
+        is_text: bool,
+        size: usize,
+        chunks: Vec<ChunkId>,
+        chunk_sizes: Vec<usize>,
+    ) -> Self {
+        let mut entry = Self::new(path, is_text, size, chunks);
+        entry.build_offset_index(&chunk_sizes);
+        entry
+    }
+
+    /// Create a holographic file entry with pre-computed chunk offsets
+    pub fn new_holographic_with_offsets(
+        path: String,
+        is_text: bool,
+        size: usize,
+        chunks: Vec<ChunkId>,
+        chunk_sizes: Vec<usize>,
+        encoding_format: u8,
+    ) -> Self {
+        let mut entry = Self::new_holographic(path, is_text, size, chunks, encoding_format);
+        entry.build_offset_index(&chunk_sizes);
+        entry
+    }
+
+    /// Check if this entry has a chunk offset index
+    pub fn has_offset_index(&self) -> bool {
+        self.chunk_offsets.is_some()
+    }
+
+    /// Find the chunk containing a given byte offset
+    ///
+    /// Returns None if the offset is beyond the file size.
+    /// Uses binary search when offset index is present (O(log n)).
+    /// Falls back to linear search otherwise (O(n)).
+    pub fn find_chunk_at_offset(&self, byte_offset: usize) -> Option<(ChunkId, usize)> {
+        if byte_offset >= self.size {
+            return None;
+        }
+
+        if let Some(ref offsets) = self.chunk_offsets {
+            // Binary search for the chunk containing this offset
+            match offsets.binary_search_by(|co| {
+                if byte_offset < co.byte_offset {
+                    std::cmp::Ordering::Greater
+                } else if byte_offset >= co.end_offset() {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            }) {
+                Ok(idx) => {
+                    let co = &offsets[idx];
+                    Some((co.chunk_id, byte_offset - co.byte_offset))
+                }
+                Err(_) => None, // Should not happen if offset < size
+            }
+        } else {
+            // No offset index - can't determine without chunk sizes
+            // Return first chunk as fallback (caller must handle)
+            self.chunks.first().map(|&id| (id, byte_offset))
+        }
+    }
+
+    /// Find all chunks needed to satisfy a byte range read
+    ///
+    /// Returns a list of ChunkRange specifying which chunks to read
+    /// and which portions of each chunk to include.
+    ///
+    /// # Arguments
+    /// * `start_offset` - Start byte offset in the file
+    /// * `length` - Number of bytes to read
+    ///
+    /// # Returns
+    /// Vec of ChunkRange for each chunk involved in the read.
+    /// Returns empty Vec if start_offset >= file size.
+    pub fn chunks_for_range(&self, start_offset: usize, length: usize) -> Vec<ChunkRange> {
+        if start_offset >= self.size || length == 0 {
+            return Vec::new();
+        }
+
+        let end_offset = (start_offset + length).min(self.size);
+
+        if let Some(ref offsets) = self.chunk_offsets {
+            let mut ranges = Vec::new();
+
+            for co in offsets.iter() {
+                // Skip chunks entirely before our range
+                if co.end_offset() <= start_offset {
+                    continue;
+                }
+                // Stop if we've passed the end of our range
+                if co.byte_offset >= end_offset {
+                    break;
+                }
+
+                // Calculate the overlap
+                let chunk_start = start_offset.saturating_sub(co.byte_offset);
+                let chunk_end = (end_offset - co.byte_offset).min(co.byte_length);
+                let range_length = chunk_end - chunk_start;
+
+                if range_length > 0 {
+                    ranges.push(ChunkRange::new(co.chunk_id, chunk_start, range_length));
+                }
+            }
+
+            ranges
+        } else {
+            // No offset index - return all chunks (caller must filter)
+            self.chunks
+                .iter()
+                .map(|&chunk_id| ChunkRange::new(chunk_id, 0, 0)) // Unknown sizes
+                .collect()
+        }
+    }
+
+    /// Get the total data size covered by all chunks (from offset index)
+    ///
+    /// Returns file size if no offset index, or the computed total from chunks.
+    pub fn computed_size(&self) -> usize {
+        if let Some(ref offsets) = self.chunk_offsets {
+            offsets.last().map(|co| co.end_offset()).unwrap_or(0)
+        } else {
+            self.size
+        }
     }
 }
 
@@ -1063,5 +1247,125 @@ mod tests {
         assert_eq!(stats.active_files, 5);
         assert_eq!(stats.deleted_files, 0);
         assert_eq!(stats.total_chunks, 5);
+    }
+
+    // =========================================================================
+    // Range Query Tests
+    // =========================================================================
+
+    #[test]
+    fn test_build_offset_index() {
+        let mut entry = VersionedFileEntry::new(
+            "test.txt".to_string(),
+            true,
+            300,           // Total size
+            vec![0, 1, 2], // 3 chunks
+        );
+
+        // Build index with varying chunk sizes
+        entry.build_offset_index(&[100, 100, 100]);
+
+        assert!(entry.has_offset_index());
+        let offsets = entry.chunk_offsets.as_ref().unwrap();
+        assert_eq!(offsets.len(), 3);
+
+        assert_eq!(offsets[0].byte_offset, 0);
+        assert_eq!(offsets[0].byte_length, 100);
+        assert_eq!(offsets[1].byte_offset, 100);
+        assert_eq!(offsets[1].byte_length, 100);
+        assert_eq!(offsets[2].byte_offset, 200);
+        assert_eq!(offsets[2].byte_length, 100);
+    }
+
+    #[test]
+    fn test_find_chunk_at_offset() {
+        let mut entry = VersionedFileEntry::new(
+            "test.txt".to_string(),
+            true,
+            256,
+            vec![10, 20, 30, 40], // 4 chunks
+        );
+        entry.build_offset_index(&[64, 64, 64, 64]); // 64 bytes each
+
+        // Test finding chunks at various offsets
+        let (chunk_id, within) = entry.find_chunk_at_offset(0).unwrap();
+        assert_eq!(chunk_id, 10);
+        assert_eq!(within, 0);
+
+        let (chunk_id, within) = entry.find_chunk_at_offset(63).unwrap();
+        assert_eq!(chunk_id, 10);
+        assert_eq!(within, 63);
+
+        let (chunk_id, within) = entry.find_chunk_at_offset(64).unwrap();
+        assert_eq!(chunk_id, 20);
+        assert_eq!(within, 0);
+
+        let (chunk_id, within) = entry.find_chunk_at_offset(200).unwrap();
+        assert_eq!(chunk_id, 40);
+        assert_eq!(within, 8);
+
+        // Beyond file size
+        assert!(entry.find_chunk_at_offset(256).is_none());
+        assert!(entry.find_chunk_at_offset(1000).is_none());
+    }
+
+    #[test]
+    fn test_chunks_for_range() {
+        let mut entry = VersionedFileEntry::new(
+            "test.txt".to_string(),
+            true,
+            256,
+            vec![10, 20, 30, 40], // 4 chunks
+        );
+        entry.build_offset_index(&[64, 64, 64, 64]); // 64 bytes each
+
+        // Range within single chunk
+        let ranges = entry.chunks_for_range(10, 20);
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].chunk_id, 10);
+        assert_eq!(ranges[0].start_within_chunk, 10);
+        assert_eq!(ranges[0].length, 20);
+
+        // Range spanning two chunks
+        let ranges = entry.chunks_for_range(50, 30);
+        assert_eq!(ranges.len(), 2);
+        assert_eq!(ranges[0].chunk_id, 10);
+        assert_eq!(ranges[0].start_within_chunk, 50);
+        assert_eq!(ranges[0].length, 14); // remaining in first chunk
+        assert_eq!(ranges[1].chunk_id, 20);
+        assert_eq!(ranges[1].start_within_chunk, 0);
+        assert_eq!(ranges[1].length, 16); // 30 - 14
+
+        // Range spanning all chunks
+        let ranges = entry.chunks_for_range(0, 256);
+        assert_eq!(ranges.len(), 4);
+        for (i, range) in ranges.iter().enumerate() {
+            assert_eq!(range.start_within_chunk, 0);
+            assert_eq!(range.length, 64);
+            assert!(range.is_full_chunk(64));
+            assert_eq!(range.chunk_id, [10, 20, 30, 40][i]);
+        }
+
+        // Empty range
+        let ranges = entry.chunks_for_range(0, 0);
+        assert!(ranges.is_empty());
+
+        // Range beyond file
+        let ranges = entry.chunks_for_range(300, 50);
+        assert!(ranges.is_empty());
+    }
+
+    #[test]
+    fn test_new_with_offsets() {
+        let entry = VersionedFileEntry::new_with_offsets(
+            "test.txt".to_string(),
+            true,
+            192,
+            vec![1, 2, 3],
+            vec![64, 64, 64],
+        );
+
+        assert!(entry.has_offset_index());
+        assert_eq!(entry.computed_size(), 192);
     }
 }

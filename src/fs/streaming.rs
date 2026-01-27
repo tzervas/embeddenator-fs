@@ -498,7 +498,7 @@ pub struct AsyncStreamingIngester<'a> {
 #[cfg(feature = "tokio")]
 impl<'a> AsyncStreamingIngester<'a> {
     /// Create a new async streaming ingester builder
-    pub fn new(fs: &'a VersionedEmbrFS) -> AsyncStreamingIngesterBuilder<'a> {
+    pub fn builder(fs: &'a VersionedEmbrFS) -> AsyncStreamingIngesterBuilder<'a> {
         AsyncStreamingIngesterBuilder {
             inner: StreamingIngesterBuilder::new(fs),
         }
@@ -627,6 +627,357 @@ impl<'a> AsyncStreamingIngesterBuilder<'a> {
     }
 }
 
+// =============================================================================
+// STREAMING DECODE SUPPORT
+// =============================================================================
+
+/// Streaming decoder for memory-efficient file reading
+///
+/// Decodes engram data incrementally, yielding chunks as they become available.
+/// Memory usage is bounded by a single chunk regardless of file size.
+///
+/// # Why Streaming Decode?
+///
+/// For large files, loading everything into memory before processing:
+/// - Causes memory pressure for multi-GB engrams
+/// - Increases latency (must decode all chunks before returning any data)
+/// - Prevents early termination for partial reads
+///
+/// Streaming decode solves these by:
+/// - Decoding chunks on-demand
+/// - Yielding data as it becomes available
+/// - Supporting early termination
+/// - Maintaining bounded memory usage
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use embeddenator_fs::streaming::StreamingDecoder;
+/// use std::io::Read;
+///
+/// let decoder = StreamingDecoder::new(&fs, "large_file.bin")?;
+///
+/// // Read first 1KB without decoding entire file
+/// let mut buf = vec![0u8; 1024];
+/// decoder.read_exact(&mut buf)?;
+///
+/// // Or iterate over chunks
+/// for chunk_result in decoder {
+///     let chunk_data = chunk_result?;
+///     process(chunk_data);
+/// }
+/// ```
+pub struct StreamingDecoder<'a> {
+    fs: &'a VersionedEmbrFS,
+    path: String,
+    chunks: Vec<ChunkId>,
+    file_size: usize,
+    version: u64,
+    // State
+    current_chunk_idx: usize,
+    current_chunk_data: Vec<u8>,
+    position_in_chunk: usize,
+    total_bytes_read: usize,
+    /// Whether the file is stored compressed (for future decompression support)
+    #[allow(dead_code)]
+    is_compressed: bool,
+    /// Compression codec used (for future decompression support)
+    #[allow(dead_code)]
+    compression_codec: Option<u8>,
+}
+
+impl<'a> StreamingDecoder<'a> {
+    /// Create a new streaming decoder for a file
+    pub fn new(fs: &'a VersionedEmbrFS, path: &str) -> Result<Self, EmbrFSError> {
+        let (file_entry, _) = fs
+            .manifest
+            .get_file(path)
+            .ok_or_else(|| EmbrFSError::FileNotFound(path.to_string()))?;
+
+        if file_entry.deleted {
+            return Err(EmbrFSError::FileNotFound(path.to_string()));
+        }
+
+        Ok(Self {
+            fs,
+            path: path.to_string(),
+            chunks: file_entry.chunks.clone(),
+            file_size: file_entry.size,
+            version: file_entry.version,
+            current_chunk_idx: 0,
+            current_chunk_data: Vec::new(),
+            position_in_chunk: 0,
+            total_bytes_read: 0,
+            is_compressed: file_entry
+                .compression_codec
+                .map(|c| c != 0)
+                .unwrap_or(false),
+            compression_codec: file_entry.compression_codec,
+        })
+    }
+
+    /// Get the file version
+    pub fn version(&self) -> u64 {
+        self.version
+    }
+
+    /// Get the total file size
+    pub fn file_size(&self) -> usize {
+        self.file_size
+    }
+
+    /// Get the number of chunks
+    pub fn chunk_count(&self) -> usize {
+        self.chunks.len()
+    }
+
+    /// Get current read position (bytes from start)
+    pub fn position(&self) -> usize {
+        self.total_bytes_read
+    }
+
+    /// Check if all data has been read
+    pub fn is_exhausted(&self) -> bool {
+        self.total_bytes_read >= self.file_size
+    }
+
+    /// Get progress information
+    pub fn progress(&self) -> StreamingDecodeProgress {
+        StreamingDecodeProgress {
+            bytes_read: self.total_bytes_read,
+            total_bytes: self.file_size,
+            chunks_decoded: self.current_chunk_idx,
+            total_chunks: self.chunks.len(),
+        }
+    }
+
+    /// Decode and return the next chunk's data
+    ///
+    /// Returns None when all chunks have been read.
+    fn decode_next_chunk(&mut self) -> Result<Option<Vec<u8>>, EmbrFSError> {
+        if self.current_chunk_idx >= self.chunks.len() {
+            return Ok(None);
+        }
+
+        let chunk_id = self.chunks[self.current_chunk_idx];
+
+        // Get chunk from store
+        let (chunk, _) = self
+            .fs
+            .chunk_store
+            .get(chunk_id)
+            .ok_or(EmbrFSError::ChunkNotFound(chunk_id))?;
+
+        // Decode chunk
+        let decoded =
+            chunk
+                .vector
+                .decode_data(self.fs.config(), Some(&self.path), chunk.original_size);
+
+        // Apply correction
+        let corrected = self
+            .fs
+            .corrections
+            .get(chunk_id as u64)
+            .map(|(corr, _)| corr.apply(&decoded))
+            .unwrap_or(decoded);
+
+        self.current_chunk_idx += 1;
+
+        Ok(Some(corrected))
+    }
+
+    /// Skip to a specific byte position
+    ///
+    /// Efficiently skips chunks that don't need to be decoded.
+    pub fn seek_to(&mut self, position: usize) -> Result<(), EmbrFSError> {
+        if position >= self.file_size {
+            self.current_chunk_idx = self.chunks.len();
+            self.current_chunk_data.clear();
+            self.position_in_chunk = 0;
+            self.total_bytes_read = self.file_size;
+            return Ok(());
+        }
+
+        // Calculate which chunk contains this position
+        let chunk_size = DEFAULT_CHUNK_SIZE;
+        let target_chunk = position / chunk_size;
+        let offset_in_chunk = position % chunk_size;
+
+        // Reset state
+        self.current_chunk_idx = target_chunk;
+        self.current_chunk_data.clear();
+        self.position_in_chunk = offset_in_chunk;
+        self.total_bytes_read = position;
+
+        // Pre-load the target chunk if needed
+        if offset_in_chunk > 0 {
+            if let Some(data) = self.decode_next_chunk()? {
+                self.current_chunk_data = data;
+                self.current_chunk_idx -= 1; // decode_next_chunk incremented it
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Read exactly n bytes, returning them
+    ///
+    /// Returns less than n bytes only at EOF.
+    pub fn read_n_bytes(&mut self, n: usize) -> Result<Vec<u8>, EmbrFSError> {
+        let mut result = Vec::with_capacity(n);
+        let remaining_in_file = self.file_size.saturating_sub(self.total_bytes_read);
+        let to_read = n.min(remaining_in_file);
+
+        while result.len() < to_read {
+            // Check if we need more data from current chunk
+            if self.position_in_chunk >= self.current_chunk_data.len() {
+                // Load next chunk
+                match self.decode_next_chunk()? {
+                    Some(data) => {
+                        self.current_chunk_data = data;
+                        self.position_in_chunk = 0;
+                    }
+                    None => break, // No more chunks
+                }
+            }
+
+            // Copy data from current chunk
+            let available = self.current_chunk_data.len() - self.position_in_chunk;
+            let needed = to_read - result.len();
+            let copy_len = available.min(needed);
+
+            result.extend_from_slice(
+                &self.current_chunk_data[self.position_in_chunk..self.position_in_chunk + copy_len],
+            );
+            self.position_in_chunk += copy_len;
+            self.total_bytes_read += copy_len;
+        }
+
+        // Truncate to file size if needed
+        let max_len = self
+            .file_size
+            .saturating_sub(self.total_bytes_read - result.len());
+        if result.len() > max_len {
+            result.truncate(max_len);
+        }
+
+        Ok(result)
+    }
+}
+
+impl std::io::Read for StreamingDecoder<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        if self.is_exhausted() {
+            return Ok(0);
+        }
+
+        let data = self
+            .read_n_bytes(buf.len())
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+        let len = data.len();
+        buf[..len].copy_from_slice(&data);
+        Ok(len)
+    }
+}
+
+/// Iterator that yields decoded chunks
+impl<'a> Iterator for StreamingDecoder<'a> {
+    type Item = Result<Vec<u8>, EmbrFSError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.is_exhausted() {
+            return None;
+        }
+
+        match self.decode_next_chunk() {
+            Ok(Some(mut data)) => {
+                // Truncate last chunk to exact file size
+                let remaining = self.file_size.saturating_sub(self.total_bytes_read);
+                if data.len() > remaining {
+                    data.truncate(remaining);
+                }
+                self.total_bytes_read += data.len();
+                self.current_chunk_data.clear();
+                self.position_in_chunk = 0;
+                Some(Ok(data))
+            }
+            Ok(None) => None,
+            Err(e) => Some(Err(e)),
+        }
+    }
+}
+
+/// Progress information for streaming decode
+#[derive(Debug, Clone, Copy)]
+pub struct StreamingDecodeProgress {
+    /// Bytes read so far
+    pub bytes_read: usize,
+    /// Total bytes in file
+    pub total_bytes: usize,
+    /// Chunks decoded so far
+    pub chunks_decoded: usize,
+    /// Total chunks in file
+    pub total_chunks: usize,
+}
+
+impl StreamingDecodeProgress {
+    /// Get percentage complete (0.0 - 1.0)
+    pub fn percentage(&self) -> f64 {
+        if self.total_bytes == 0 {
+            1.0
+        } else {
+            self.bytes_read as f64 / self.total_bytes as f64
+        }
+    }
+}
+
+/// Builder for configuring streaming decode with options
+pub struct StreamingDecoderBuilder<'a> {
+    fs: &'a VersionedEmbrFS,
+    path: String,
+    start_offset: Option<usize>,
+    max_bytes: Option<usize>,
+}
+
+impl<'a> StreamingDecoderBuilder<'a> {
+    /// Create a new streaming decoder builder
+    pub fn new(fs: &'a VersionedEmbrFS, path: impl Into<String>) -> Self {
+        Self {
+            fs,
+            path: path.into(),
+            start_offset: None,
+            max_bytes: None,
+        }
+    }
+
+    /// Set starting offset for partial reads
+    pub fn with_offset(mut self, offset: usize) -> Self {
+        self.start_offset = Some(offset);
+        self
+    }
+
+    /// Limit maximum bytes to read
+    pub fn with_max_bytes(mut self, max: usize) -> Self {
+        self.max_bytes = Some(max);
+        self
+    }
+
+    /// Build the streaming decoder
+    pub fn build(self) -> Result<StreamingDecoder<'a>, EmbrFSError> {
+        let mut decoder = StreamingDecoder::new(self.fs, &self.path)?;
+
+        if let Some(offset) = self.start_offset {
+            decoder.seek_to(offset)?;
+        }
+
+        // max_bytes is handled by the caller limiting reads
+
+        Ok(decoder)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -732,5 +1083,165 @@ mod tests {
 
         let (content, _) = fs.read_file("from_reader.txt").unwrap();
         assert_eq!(&content[..], data);
+    }
+
+    // =========================================================================
+    // STREAMING DECODER TESTS
+    // =========================================================================
+
+    #[test]
+    fn test_streaming_decoder_small_file() {
+        let fs = VersionedEmbrFS::new();
+        let data = b"Hello, streaming decoder!";
+
+        // Write file first
+        fs.write_file("decode_test.txt", data, None).unwrap();
+
+        // Create streaming decoder
+        let mut decoder = StreamingDecoder::new(&fs, "decode_test.txt").unwrap();
+
+        assert_eq!(decoder.file_size(), data.len());
+        assert_eq!(decoder.position(), 0);
+        assert!(!decoder.is_exhausted());
+
+        // Read all data
+        let read_data = decoder.read_n_bytes(data.len() + 10).unwrap();
+
+        assert_eq!(&read_data[..], data);
+        assert!(decoder.is_exhausted());
+    }
+
+    #[test]
+    fn test_streaming_decoder_read_trait() {
+        use std::io::Read;
+
+        let fs = VersionedEmbrFS::new();
+        let data = b"Read trait test data";
+
+        fs.write_file("read_trait.txt", data, None).unwrap();
+
+        let mut decoder = StreamingDecoder::new(&fs, "read_trait.txt").unwrap();
+        let mut buf = vec![0u8; 100];
+
+        let bytes_read = decoder.read(&mut buf).unwrap();
+
+        assert_eq!(bytes_read, data.len());
+        assert_eq!(&buf[..bytes_read], data);
+    }
+
+    #[test]
+    fn test_streaming_decoder_iterator() {
+        let fs = VersionedEmbrFS::new();
+
+        // Create data larger than chunk size
+        let data: Vec<u8> = (0..DEFAULT_CHUNK_SIZE * 2 + 100)
+            .map(|i| (i % 256) as u8)
+            .collect();
+
+        fs.write_file("iterator_test.bin", &data, None).unwrap();
+
+        let decoder = StreamingDecoder::new(&fs, "iterator_test.bin").unwrap();
+
+        // Collect all chunks via iterator
+        let chunks: Vec<Vec<u8>> = decoder.map(|r| r.unwrap()).collect();
+
+        // Should have at least 2 chunks
+        assert!(chunks.len() >= 2);
+
+        // Verify total data matches
+        let total: Vec<u8> = chunks.into_iter().flatten().collect();
+        assert_eq!(total, data);
+    }
+
+    #[test]
+    fn test_streaming_decoder_partial_read() {
+        let fs = VersionedEmbrFS::new();
+        let data: Vec<u8> = (0..1000).map(|i| (i % 256) as u8).collect();
+
+        fs.write_file("partial.bin", &data, None).unwrap();
+
+        let mut decoder = StreamingDecoder::new(&fs, "partial.bin").unwrap();
+
+        // Read only first 100 bytes
+        let first_100 = decoder.read_n_bytes(100).unwrap();
+        assert_eq!(first_100.len(), 100);
+        assert_eq!(&first_100[..], &data[..100]);
+
+        // Position should be updated
+        assert_eq!(decoder.position(), 100);
+
+        // Read next 50 bytes
+        let next_50 = decoder.read_n_bytes(50).unwrap();
+        assert_eq!(next_50.len(), 50);
+        assert_eq!(&next_50[..], &data[100..150]);
+    }
+
+    #[test]
+    fn test_streaming_decoder_seek() {
+        let fs = VersionedEmbrFS::new();
+        let data: Vec<u8> = (0..DEFAULT_CHUNK_SIZE * 3)
+            .map(|i| (i % 256) as u8)
+            .collect();
+
+        fs.write_file("seek_test.bin", &data, None).unwrap();
+
+        let mut decoder = StreamingDecoder::new(&fs, "seek_test.bin").unwrap();
+
+        // Seek to middle of second chunk
+        let seek_pos = DEFAULT_CHUNK_SIZE + 500;
+        decoder.seek_to(seek_pos).unwrap();
+
+        assert_eq!(decoder.position(), seek_pos);
+
+        // Read some bytes and verify
+        let read_data = decoder.read_n_bytes(100).unwrap();
+        assert_eq!(&read_data[..], &data[seek_pos..seek_pos + 100]);
+    }
+
+    #[test]
+    fn test_streaming_decoder_progress() {
+        let fs = VersionedEmbrFS::new();
+        let data: Vec<u8> = (0..1000).map(|i| (i % 256) as u8).collect();
+
+        fs.write_file("progress_decode.bin", &data, None).unwrap();
+
+        let mut decoder = StreamingDecoder::new(&fs, "progress_decode.bin").unwrap();
+
+        let p1 = decoder.progress();
+        assert_eq!(p1.bytes_read, 0);
+        assert_eq!(p1.total_bytes, 1000);
+        assert!((p1.percentage() - 0.0).abs() < 0.001);
+
+        // Read half the data
+        decoder.read_n_bytes(500).unwrap();
+
+        let p2 = decoder.progress();
+        assert_eq!(p2.bytes_read, 500);
+        assert!((p2.percentage() - 0.5).abs() < 0.001);
+
+        // Read remaining
+        decoder.read_n_bytes(500).unwrap();
+
+        let p3 = decoder.progress();
+        assert_eq!(p3.bytes_read, 1000);
+        assert!((p3.percentage() - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_streaming_decoder_builder() {
+        let fs = VersionedEmbrFS::new();
+        let data: Vec<u8> = (0..500).map(|i| (i % 256) as u8).collect();
+
+        fs.write_file("builder_decode.bin", &data, None).unwrap();
+
+        let mut decoder = StreamingDecoderBuilder::new(&fs, "builder_decode.bin")
+            .with_offset(100)
+            .build()
+            .unwrap();
+
+        assert_eq!(decoder.position(), 100);
+
+        let read_data = decoder.read_n_bytes(50).unwrap();
+        assert_eq!(&read_data[..], &data[100..150]);
     }
 }

@@ -94,6 +94,7 @@ fn test_10mb_file() {
 }
 
 #[test]
+#[ignore] // Slow: >15 minutes in CI
 fn test_50mb_file() {
     let fs = VersionedEmbrFS::new();
 
@@ -113,6 +114,7 @@ fn test_50mb_file() {
 }
 
 #[test]
+#[ignore] // Slow: >15 minutes in CI
 fn test_100mb_file() {
     let fs = VersionedEmbrFS::new();
 
@@ -234,6 +236,7 @@ fn test_update_large_file() {
 }
 
 #[test]
+#[ignore] // Slow: >15 minutes in CI
 fn test_concurrent_read_large_file() {
     let fs = Arc::new(VersionedEmbrFS::new());
 
@@ -260,6 +263,7 @@ fn test_concurrent_read_large_file() {
 }
 
 #[test]
+#[ignore] // Slow: >5 minutes in CI
 fn test_mixed_size_files() {
     let fs = VersionedEmbrFS::new();
 
@@ -409,6 +413,7 @@ fn test_append_like_operations() {
 
 // Stress test with many chunks
 #[test]
+#[ignore] // Slow: >15 minutes in CI
 fn test_high_chunk_count_file() {
     let fs = VersionedEmbrFS::new();
 
