@@ -27,6 +27,16 @@ jobs:
             fi
           done
 
+      - name: Fix embeddenator-retrieval bincode dependency
+        run: |
+          # embeddenator-retrieval on GitHub has bincode = "3.0" which pulls in
+          # bincode 3.0.0 that has intentional compile_error (XKCD 2347 protest)
+          # Fix by downgrading to bincode 2.0 which works
+          cd ../embeddenator-retrieval
+          sed -i 's/bincode = "3.0"/bincode = "2.0"/' Cargo.toml
+          echo "Fixed embeddenator-retrieval bincode dependency:"
+          grep bincode Cargo.toml
+
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@master
         with:
