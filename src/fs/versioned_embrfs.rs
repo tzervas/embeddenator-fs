@@ -838,12 +838,13 @@ impl VersionedEmbrFS {
 
         // Verify old data matches
         if offset + old_data.len() <= content.len()
-            && &content[offset..offset + old_data.len()] != old_data {
-                return Err(EmbrFSError::VersionMismatch {
-                    expected: 0,
-                    actual: 1,
-                });
-            }
+            && &content[offset..offset + old_data.len()] != old_data
+        {
+            return Err(EmbrFSError::VersionMismatch {
+                expected: 0,
+                actual: 1,
+            });
+        }
 
         // Apply the replacement
         let before = &content[..offset];
