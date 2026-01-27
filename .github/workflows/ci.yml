@@ -9,7 +9,7 @@ jobs:
   ci:
     uses: tzervas/embeddenator-workflows/.github/workflows/reusable-ci.yml@v1
     with:
-      rust-version: '1.85'
+      rust-version: '1.86'
       run-tests: true
       run-benchmarks: false
       enable-fuse: true
