@@ -320,7 +320,7 @@ pub fn save_hierarchical_manifest<P: AsRef<Path>>(
     }
 
     let mut levels = hierarchical.levels.clone();
-    levels.sort_by(|a, b| a.level.cmp(&b.level));
+    levels.sort_by_key(|a| a.level);
     for level in &mut levels {
         level.items.sort_by(|a, b| {
             a.path
