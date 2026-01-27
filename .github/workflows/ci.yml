@@ -2,15 +2,60 @@ name: CI
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop, dev]
   pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
   ci:
-    uses: tzervas/embeddenator-workflows/.github/workflows/reusable-ci.yml@v1
-    with:
-      rust-version: '1.86'
-      run-tests: true
-      run-benchmarks: false
-      enable-fuse: true
-      cache-key-prefix: 'embeddenator-fs'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Clone dependency repos
+        run: |
+          cd ..
+          for repo in embeddenator-vsa embeddenator-core embeddenator-io embeddenator-retrieval embeddenator-interop embeddenator-obs; do
+            if [ ! -d "$repo" ]; then
+              git clone --depth 1 https://github.com/tzervas/$repo.git || true
+            fi
+          done
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: '1.86'
+          components: rustfmt, clippy
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Setup FUSE
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfuse3-dev fuse3
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: 'embeddenator-fs'
+
+      - name: Check formatting
+        run: cargo fmt --check
+
+      - name: Run clippy
+        run: cargo clippy --locked --all-features -- -D warnings
+
+      - name: Build (locked)
+        run: cargo build --locked --release --all-features
+
+      - name: Run tests (locked)
+        run: cargo nextest run --locked --all-features
+
+      - name: Build documentation
+        run: cargo doc --locked --no-deps --all-features
