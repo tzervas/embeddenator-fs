@@ -1,4 +1,5 @@
 pub mod correction;
+pub mod delta;
 pub mod embrfs;
 pub mod fuse_shim;
 pub mod large_file;
@@ -9,6 +10,7 @@ pub mod versioned_embrfs;
 pub mod versioned_fuse;
 
 pub use correction::*;
+pub use delta::{analyze_delta, AffectedChunks, ChunkModification, Delta, DeltaType, NewChunk};
 pub use embrfs::*;
 pub use fuse_shim::*;
 pub use large_file::*;
