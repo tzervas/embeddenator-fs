@@ -69,8 +69,8 @@
 //! - **Full purge**: `cache.purge()` removes everything
 
 use std::collections::HashMap;
-use std::fs::{self, File};
-use std::io::{self, Read, Write};
+use std::fs::{self};
+use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -435,8 +435,7 @@ impl ImageCache {
 
     /// Save cache state to disk
     fn save_state(&self) -> io::Result<()> {
-        let content = serde_json::to_string_pretty(&self.state)
-            .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
+        let content = serde_json::to_string_pretty(&self.state).map_err(io::Error::other)?;
         fs::write(&self.state_path, content)?;
         Ok(())
     }
@@ -475,17 +474,14 @@ fn compute_sha256(path: &Path) -> io::Result<String> {
     let output = Command::new("sha256sum").arg(path).output()?;
 
     if !output.status.success() {
-        return Err(io::Error::new(
-            io::ErrorKind::Other,
-            "sha256sum command failed",
-        ));
+        return Err(io::Error::other("sha256sum command failed"));
     }
 
     let output_str = String::from_utf8_lossy(&output.stdout);
     let hash = output_str
         .split_whitespace()
         .next()
-        .ok_or_else(|| io::Error::new(io::ErrorKind::Other, "Failed to parse sha256sum output"))?;
+        .ok_or_else(|| io::Error::other("Failed to parse sha256sum output"))?;
 
     Ok(hash.to_string())
 }

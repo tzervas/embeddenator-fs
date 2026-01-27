@@ -75,7 +75,7 @@ mod symlink_tests {
     #[test]
     fn test_symlink_chain() {
         // Create a chain: link1 -> link2 -> link3 -> actual_file
-        let links = vec![
+        let links = [
             ("/chain/link1", "link2"),
             ("/chain/link2", "link3"),
             ("/chain/link3", "actual_file"),
@@ -168,7 +168,7 @@ mod hardlink_tests {
     fn test_hardlink_target_resolution() {
         // Multiple hardlinks to the same file
         let original = "/data/original.txt";
-        let hardlinks = vec![
+        let hardlinks = [
             "/data/link1.txt",
             "/data/link2.txt",
             "/data/subdir/link3.txt",
@@ -543,7 +543,7 @@ mod integration_tests {
 
         for (path, is_char, major, minor) in devices {
             fs.add_device(path, is_char, major, minor, Vec::new())
-                .expect(&format!("Failed to add {}", path));
+                .unwrap_or_else(|_| panic!("Failed to add {}", path));
         }
 
         assert_eq!(fs.device_count(), 6);

@@ -31,12 +31,10 @@
 //! By centralizing the common logic, we ensure consistent behavior and make
 //! it easy to add new architectures.
 
-use std::fs::{self, File};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::fs::{self};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use super::{Architecture, BootResult, TestImage};
@@ -160,7 +158,7 @@ pub fn ensure_image_available(image: &TestImage) -> Result<PathBuf, BootError> {
 }
 
 /// Download a file with progress display
-fn download_with_progress(url: &str, path: &Path, expected_mb: u32) -> Result<(), BootError> {
+fn download_with_progress(url: &str, path: &Path, _expected_mb: u32) -> Result<(), BootError> {
     // Use curl for downloading (available on all platforms)
     // We could use reqwest but that adds dependencies to test code
     let output = Command::new("curl")
@@ -199,10 +197,7 @@ fn compute_sha256(path: &Path) -> Result<String, BootError> {
     let output = Command::new("sha256sum").arg(path).output()?;
 
     if !output.status.success() {
-        return Err(BootError::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            "sha256sum failed",
-        )));
+        return Err(BootError::Io(std::io::Error::other("sha256sum failed")));
     }
 
     let output_str = String::from_utf8_lossy(&output.stdout);
@@ -252,7 +247,7 @@ pub struct BootTestConfig {
 ///    - Remove temporary files
 pub fn run_boot_test(config: BootTestConfig) -> Result<BootResult, BootError> {
     let arch = config.image.arch;
-    let start = Instant::now();
+    let _start = Instant::now();
 
     // Check QEMU is available
     if !super::qemu_available(arch) {
@@ -293,7 +288,7 @@ pub fn run_boot_test(config: BootTestConfig) -> Result<BootResult, BootError> {
         &mount_point,
         config.use_kvm,
         timeout,
-        &config.image.success_marker,
+        config.image.success_marker,
         &config.extra_args,
     );
     let boot_time = boot_start.elapsed();
@@ -343,7 +338,7 @@ pub fn run_boot_test(config: BootTestConfig) -> Result<BootResult, BootError> {
 /// 1. Tests should exercise the same code path users will use
 /// 2. It validates the CLI is working correctly
 /// 3. Library APIs may change; CLI is stable public interface
-fn encode_image_to_engram(image_path: &Path, arch: Architecture) -> Result<PathBuf, BootError> {
+fn encode_image_to_engram(image_path: &Path, _arch: Architecture) -> Result<PathBuf, BootError> {
     let engram_path = image_path.with_extension("embr");
 
     // Use embr CLI to encode
@@ -365,7 +360,7 @@ fn encode_image_to_engram(image_path: &Path, arch: Architecture) -> Result<PathB
             "embr encode exited with status {}",
             s
         ))),
-        Err(e) => {
+        Err(_e) => {
             // embr not installed, use mock for testing
             println!("⚠ embr CLI not found, creating mock engram for testing");
             create_mock_engram(image_path, &engram_path)?;
@@ -514,7 +509,7 @@ fn boot_qemu(
 
     // Use non-blocking reads with timeout
     for line in reader.lines() {
-        let line = line.map_err(|e| BootError::Io(e))?;
+        let line = line.map_err(BootError::Io)?;
         output.push_str(&line);
         output.push('\n');
 

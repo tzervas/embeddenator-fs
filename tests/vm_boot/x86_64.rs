@@ -38,7 +38,7 @@
 //! - **TCG**: 30 seconds to login (for hosts without KVM)
 
 use super::common::{run_boot_test, BootError, BootTestConfig};
-use super::{Architecture, BootResult, TestImage};
+use super::{Architecture, TestImage};
 
 /// Alpine Linux 3.19 "virt" image for x86_64
 ///

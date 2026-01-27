@@ -1262,8 +1262,8 @@ impl fuser::Filesystem for EngramFS {
 
         // Determine file type from mode
         let file_type = mode & libc::S_IFMT;
-        let major = ((rdev >> 8) & 0xff) as u32;
-        let minor = (rdev & 0xff) as u32;
+        let major = (rdev >> 8) & 0xff;
+        let minor = rdev & 0xff;
 
         let result = match file_type {
             libc::S_IFCHR => self.add_device(&file_path, true, major, minor, Vec::new()),
@@ -1368,6 +1368,94 @@ pub fn mount<P: AsRef<Path>>(
     }
 
     fuser::mount2(fs, mountpoint.as_ref(), &mount_options)
+}
+
+/// Mount an EngramFS with signal handling for graceful unmount
+///
+/// This function installs signal handlers for SIGINT, SIGTERM, and SIGHUP,
+/// enabling graceful unmount when the user presses Ctrl+C or sends a kill signal.
+///
+/// # Arguments
+///
+/// * `fs` - The EngramFS instance to mount
+/// * `mountpoint` - Directory path where the filesystem will be mounted
+/// * `options` - Mount options (see `MountOptions`)
+///
+/// # Signal Handling
+///
+/// When a signal is received:
+/// 1. The signal type is logged
+/// 2. The FUSE session is cleanly unmounted
+/// 3. The function returns `Ok(())`
+///
+/// # Example
+///
+/// ```no_run
+/// use embeddenator_fs::fuse_shim::{EngramFS, mount_with_signals, MountOptions};
+///
+/// let fs = EngramFS::new(true);
+/// // ... populate fs with files ...
+///
+/// // This will handle Ctrl+C gracefully
+/// mount_with_signals(fs, "/mnt/engram", MountOptions::default()).unwrap();
+/// ```
+#[cfg(feature = "fuse")]
+pub fn mount_with_signals<P: AsRef<Path>>(
+    fs: EngramFS,
+    mountpoint: P,
+    options: MountOptions,
+) -> Result<(), std::io::Error> {
+    use crate::fs::signal::{install_signal_handlers, ShutdownSignal};
+    use fuser::MountOption;
+    use std::sync::Arc;
+
+    // Set up shutdown signal
+    let shutdown = Arc::new(ShutdownSignal::new());
+    install_signal_handlers(shutdown.clone())?;
+
+    let mut mount_options = vec![
+        MountOption::FSName(options.fsname),
+        MountOption::AutoUnmount,
+        MountOption::DefaultPermissions,
+    ];
+
+    if options.read_only {
+        mount_options.push(MountOption::RO);
+    }
+
+    if options.allow_other {
+        mount_options.push(MountOption::AllowOther);
+    } else if options.allow_root {
+        mount_options.push(MountOption::AllowRoot);
+    }
+
+    // Use spawn_mount2 to get a session we can control
+    let session = fuser::spawn_mount2(fs, mountpoint.as_ref(), &mount_options)?;
+
+    // Wait for shutdown signal or natural unmount
+    eprintln!("EngramFS mounted. Press Ctrl+C to unmount gracefully.");
+
+    // Poll for shutdown signal
+    loop {
+        if shutdown.is_signaled() {
+            eprintln!(
+                "\nReceived {} - unmounting gracefully...",
+                shutdown.signal_name()
+            );
+            // Session will be dropped here, triggering unmount
+            drop(session);
+            break;
+        }
+
+        // Check if session is still alive by sleeping briefly
+        std::thread::sleep(std::time::Duration::from_millis(100));
+
+        // Try to detect if session ended (e.g., via fusermount -u)
+        // The session will be joined when dropped
+    }
+
+    eprintln!("EngramFS unmounted cleanly.");
+    Ok(())
 }
 
 /// Spawn an EngramFS mount in a background thread

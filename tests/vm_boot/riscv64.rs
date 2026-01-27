@@ -44,7 +44,7 @@
 //! - U-Boot or direct kernel boot
 
 use super::common::{run_boot_test, BootError, BootTestConfig};
-use super::{Architecture, BootResult, TestImage};
+use super::{Architecture, TestImage};
 
 /// Fedora RISC-V 39 minimal image
 ///
