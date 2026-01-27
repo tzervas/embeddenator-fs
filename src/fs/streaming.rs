@@ -498,7 +498,7 @@ pub struct AsyncStreamingIngester<'a> {
 #[cfg(feature = "tokio")]
 impl<'a> AsyncStreamingIngester<'a> {
     /// Create a new async streaming ingester builder
-    pub fn new(fs: &'a VersionedEmbrFS) -> AsyncStreamingIngesterBuilder<'a> {
+    pub fn builder(fs: &'a VersionedEmbrFS) -> AsyncStreamingIngesterBuilder<'a> {
         AsyncStreamingIngesterBuilder {
             inner: StreamingIngesterBuilder::new(fs),
         }
