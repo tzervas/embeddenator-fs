@@ -72,7 +72,14 @@ pub const ENCODING_FORMAT_LEGACY: u8 = 0;
 /// Format 1: ReversibleVSAEncoder - ~94% uncorrected accuracy
 pub const ENCODING_FORMAT_REVERSIBLE_VSA: u8 = 1;
 
-/// Chunk size for ReversibleVSAEncoder (64 bytes for optimal accuracy)
+/// Internal symbol chunk size for `ReversibleVSAEncoder`.
+///
+/// This 64-byte size was chosen empirically: benchmarks showed that it
+/// provides a good trade-off between reconstruction accuracy and encoding
+/// overhead, with larger sizes giving negligible accuracy improvements for
+/// typical workloads while increasing memory and CPU cost. This is distinct
+/// from `DEFAULT_CHUNK_SIZE` (4KB), which controls how file data is split
+/// before being passed to the encoder.
 pub const REVERSIBLE_CHUNK_SIZE: usize = 64;
 
 /// Error types for VersionedEmbrFS operations
