@@ -37,10 +37,12 @@ jobs:
           echo "Fixed embeddenator-retrieval bincode dependency:"
           grep bincode Cargo.toml
 
+      # Note: Using nightly Rust because embeddenator-vsa on GitHub uses
+      # unstable features (avx512f, stdarch_x86_avx512, unsigned_is_multiple_of)
       - name: Set up Rust
         uses: dtolnay/rust-toolchain@master
         with:
-          toolchain: '1.86'
+          toolchain: 'nightly'
           components: rustfmt, clippy
 
       - name: Install cargo-nextest
