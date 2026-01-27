@@ -514,8 +514,10 @@ mod tests {
     #[test]
     fn test_large_file_hierarchical_encoding() {
         let fs = VersionedEmbrFS::new();
-        let mut config = LargeFileConfig::default();
-        config.max_bundle_size = 10; // Force hierarchical with small bundle size
+        let config = LargeFileConfig {
+            max_bundle_size: 10, // Force hierarchical with small bundle size
+            ..Default::default()
+        };
         let handler = LargeFileHandler::with_config(&fs, config);
 
         // Create file that will require hierarchical encoding

@@ -28,6 +28,9 @@ use fuser::{
 #[cfg(feature = "fuse")]
 use std::ffi::OsStr;
 
+/// Type alias for extended attributes storage: inode -> (attr_name -> attr_value)
+type XattrStorage = Arc<RwLock<HashMap<Ino, HashMap<String, Vec<u8>>>>>;
+
 /// FUSE adapter for VersionedEmbrFS
 ///
 /// Provides full read-write FUSE filesystem on top of VersionedEmbrFS.
@@ -62,7 +65,7 @@ pub struct VersionedFUSE {
     open_files: Arc<RwLock<HashMap<u64, (String, u64)>>>,
 
     /// Extended attributes storage (ino -> (name -> value))
-    xattrs: Arc<RwLock<HashMap<Ino, HashMap<String, Vec<u8>>>>>,
+    xattrs: XattrStorage,
 
     /// TTL for attributes
     attr_ttl: Duration,

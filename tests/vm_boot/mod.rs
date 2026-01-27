@@ -120,7 +120,7 @@ pub mod riscv64;
 pub mod x86_64;
 
 use std::path::PathBuf;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 /// Result of a VM boot test
 #[derive(Debug)]
@@ -254,7 +254,7 @@ impl TestImage {
 pub fn kvm_available() -> bool {
     std::path::Path::new("/dev/kvm").exists()
         && std::fs::metadata("/dev/kvm")
-            .map(|m| m.permissions().readonly() == false)
+            .map(|m| !m.permissions().readonly())
             .unwrap_or(false)
 }
 

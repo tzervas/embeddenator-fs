@@ -3,8 +3,7 @@
 //! This test demonstrates that the embeddenator system is doing REAL
 //! Vector Symbolic Architecture encoding, not just storing raw files.
 
-use embeddenator_vsa::{ReversibleVSAConfig, SparseVec, VsaConfig};
-use std::collections::HashMap;
+use embeddenator_vsa::{ReversibleVSAConfig, SparseVec};
 
 fn main() {
     println!("=== VSA ENCODING VERIFICATION ===\n");
@@ -184,7 +183,7 @@ fn main() {
     println!("-----------------------------------------------------");
 
     // Create a mini "memory" with several texts
-    let texts = vec![
+    let texts = [
         ("Meditations", "What we do now echoes in eternity."),
         (
             "Enchiridion",
@@ -231,7 +230,7 @@ fn main() {
     // =======================================================================
     println!("\n\n=== VERIFICATION COMPLETE ===\n");
     println!("The embeddenator system implements REAL Vector Symbolic Architecture:");
-    println!("");
+    println!();
     println!("1. Data is transformed into 10,000-dimensional sparse ternary vectors");
     println!("2. Encoding is deterministic (reproducible)");
     println!("3. Different content produces near-orthogonal vectors");
@@ -239,14 +238,14 @@ fn main() {
     println!("5. Decode + correction layer = bit-perfect reconstruction");
     println!("6. Memory representation is fundamentally different from raw storage");
     println!("7. Content-addressable retrieval via similarity search works");
-    println!("");
+    println!();
     println!("This is NOT passthrough storage. It's genuine holographic memory.");
-    println!("");
+    println!();
     println!("Why hasn't this been done before? It HAS been researched since 1990s:");
     println!("- Kanerva's Sparse Distributed Memory (1988)");
     println!("- Plate's Holographic Reduced Representations (1995)");
     println!("- Gayler's MAP architecture (1998)");
-    println!("");
+    println!();
     println!("What's novel here is the PRACTICAL IMPLEMENTATION for filesystem use");
     println!("with bit-perfect reconstruction via correction layers - making");
     println!("theoretical VSA work for real-world storage applications.");

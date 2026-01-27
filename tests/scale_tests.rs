@@ -582,7 +582,7 @@ mod hardlink_stress {
 
         // Should have 100 unique inodes, each with 6 paths (original + 5 links)
         assert_eq!(inode_map.len(), 100);
-        for (_ino, paths) in &inode_map {
+        for paths in inode_map.values() {
             assert_eq!(paths.len(), 6);
         }
 

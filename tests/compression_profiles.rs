@@ -235,6 +235,7 @@ mod profile_selection {
     }
 
     #[test]
+    #[allow(clippy::assertions_on_constants)] // These validate const values at compile time
     fn test_compression_ratio_estimates() {
         // Verify expected compression ratios are reasonable
 

@@ -5,9 +5,10 @@
 //! Run with:
 //!   cargo bench --bench incremental_benchmark
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use embeddenator_fs::{EmbrFS, ReversibleVSAConfig};
 use std::fs;
+use std::hint::black_box;
 
 fn create_base_engram(file_count: usize, file_size: usize) -> (EmbrFS, std::path::PathBuf) {
     let temp_dir = std::env::temp_dir().join(format!("embr_bench_incr_{}", file_count));

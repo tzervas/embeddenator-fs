@@ -1262,8 +1262,8 @@ impl fuser::Filesystem for EngramFS {
 
         // Determine file type from mode
         let file_type = mode & libc::S_IFMT;
-        let major = ((rdev >> 8) & 0xff) as u32;
-        let minor = (rdev & 0xff) as u32;
+        let major = (rdev >> 8) & 0xff;
+        let minor = rdev & 0xff;
 
         let result = match file_type {
             libc::S_IFCHR => self.add_device(&file_path, true, major, minor, Vec::new()),

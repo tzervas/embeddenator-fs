@@ -5,9 +5,10 @@
 //! Run with:
 //!   cargo bench --bench ingest_benchmark
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use embeddenator_fs::{EmbrFS, ReversibleVSAConfig};
 use std::fs;
+use std::hint::black_box;
 
 fn create_test_data(size_bytes: usize, pattern: u8) -> Vec<u8> {
     vec![pattern; size_bytes]

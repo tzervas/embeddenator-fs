@@ -208,7 +208,7 @@ mod vsa_algebraic {
         );
 
         // Boundedness: -1 <= sim <= 1
-        assert!(sim_ab >= -1.0 && sim_ab <= 1.0, "Similarity out of bounds");
+        assert!((-1.0..=1.0).contains(&sim_ab), "Similarity out of bounds");
     }
 
     #[test]
@@ -586,7 +586,7 @@ mod integration {
             .unwrap();
 
         // Binary - should use zstd-6
-        let binary = vec![0xDE, 0xAD, 0xBE, 0xEF].repeat(256);
+        let binary = [0xDE, 0xAD, 0xBE, 0xEF].repeat(256);
         fs.write_file_compressed("/usr/bin/test", &binary, None)
             .unwrap();
 

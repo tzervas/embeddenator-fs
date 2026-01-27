@@ -36,11 +36,11 @@ fn main() {
     println!("1. Loading ebooks into engram...");
     for file in &files {
         let path = format!("{}/{}", ebook_dir, file);
-        let data = std::fs::read(&path).expect(&format!("Failed to read {}", file));
+        let data = std::fs::read(&path).unwrap_or_else(|_| panic!("Failed to read {}", file));
         let hash = sha256(&data);
         original_hashes.insert(file.to_string(), hash.clone());
         fs.write_file(file, &data, None)
-            .expect(&format!("Failed to write {}", file));
+            .unwrap_or_else(|_| panic!("Failed to write {}", file));
         println!(
             "   Loaded {}: {} bytes, SHA256: {}...",
             file,
@@ -132,7 +132,7 @@ fn main() {
     for file in &unmodified_files {
         let (data, _) = fs
             .read_file(file)
-            .expect(&format!("Failed to read {}", file));
+            .unwrap_or_else(|_| panic!("Failed to read {}", file));
         let hash = sha256(&data);
         let original_hash = original_hashes.get(*file).unwrap();
         if &hash == original_hash {

@@ -102,8 +102,8 @@ fn main() {
 
     // Test 2: High entropy (random bytes - worst case)
     let mut random_data = vec![0u8; 1024];
-    for i in 0..random_data.len() {
-        random_data[i] = (i * 17 + 31) as u8; // Pseudo-random
+    for (i, byte) in random_data.iter_mut().enumerate() {
+        *byte = (i * 17 + 31) as u8; // Pseudo-random
     }
     analyze_correction_overhead("Pseudo-Random Bytes", &random_data, &config);
 

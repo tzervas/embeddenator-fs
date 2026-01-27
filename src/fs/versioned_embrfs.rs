@@ -804,10 +804,8 @@ impl VersionedEmbrFS {
 
         match encoding_format {
             ENCODING_FORMAT_REVERSIBLE_VSA => self.read_file_holographic_reversible(&file_entry),
-            ENCODING_FORMAT_LEGACY | _ => {
-                // Legacy format: use codebook-based reconstruction
-                self.read_file_holographic_legacy(&file_entry)
-            }
+            // Legacy format (0) and any unknown formats: use codebook-based reconstruction
+            _ => self.read_file_holographic_legacy(&file_entry),
         }
     }
 

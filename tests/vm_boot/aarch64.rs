@@ -39,7 +39,7 @@
 //! - UEFI boot via AAVMF firmware
 
 use super::common::{run_boot_test, BootError, BootTestConfig};
-use super::{Architecture, BootResult, TestImage};
+use super::{Architecture, TestImage};
 
 /// Alpine Linux 3.19 "virt" image for aarch64
 ///
@@ -230,7 +230,6 @@ fn find_aarch64_firmware() -> Option<String> {
 #[ignore = "Local-only: cross-architecture benchmark"]
 fn bench_aarch64_vs_x86_64_encoding() {
     use super::x86_64::ALPINE_X86_64;
-    use std::time::Instant;
 
     // This would compare encoding times for both architectures
     // Currently just a placeholder for the benchmark infrastructure

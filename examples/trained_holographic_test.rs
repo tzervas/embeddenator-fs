@@ -7,7 +7,6 @@
 
 use embeddenator_fs::VersionedEmbrFS;
 use embeddenator_vsa::{Codebook, CodebookTrainingConfig, DIM};
-use std::sync::{Arc, RwLock};
 
 fn test_with_trained_codebook(name: &str, data: &[u8], fs: &VersionedEmbrFS) {
     println!("\n=== {} ({} bytes) ===", name, data.len());
@@ -117,7 +116,7 @@ fn main() {
 
     // 3. Create filesystem with trained codebook
     println!("\n3. Creating holographic filesystem...");
-    let mut fs = VersionedEmbrFS::new_holographic();
+    let fs = VersionedEmbrFS::new_holographic();
 
     // Replace the codebook with our trained one
     *fs.codebook().write().unwrap() = codebook;

@@ -5,10 +5,11 @@
 //! Run with:
 //!   cargo bench --bench query_benchmark
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use embeddenator_fs::{EmbrFS, ReversibleVSAConfig};
 use embeddenator_vsa::SparseVec;
 use std::fs;
+use std::hint::black_box;
 
 fn create_test_corpus(
     dir: &std::path::Path,

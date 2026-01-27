@@ -40,7 +40,7 @@
 //! let file = File::open("large_file.bin")?;
 //! let reader = BufReader::new(file);
 //!
-//! let mut ingester = StreamingIngester::new(&fs)
+//! let mut ingester = StreamingIngester::builder(&fs)
 //!     .with_chunk_size(8192)
 //!     .with_path("large_file.bin");
 //!
@@ -110,7 +110,7 @@ impl<'a> StreamingIngesterBuilder<'a> {
     /// Smaller chunks improve memory efficiency but may reduce encoding quality
     /// for highly correlated data. Default is 4KB.
     pub fn with_chunk_size(mut self, size: usize) -> Self {
-        self.chunk_size = size.max(512).min(1024 * 1024); // Clamp to 512B - 1MB
+        self.chunk_size = size.clamp(512, 1024 * 1024); // Clamp to 512B - 1MB
         self
     }
 
@@ -199,8 +199,8 @@ pub struct StreamingIngester<'a> {
 }
 
 impl<'a> StreamingIngester<'a> {
-    /// Create a new streaming ingester with default settings
-    pub fn new(fs: &'a VersionedEmbrFS) -> StreamingIngesterBuilder<'a> {
+    /// Create a builder for configuring a streaming ingester
+    pub fn builder(fs: &'a VersionedEmbrFS) -> StreamingIngesterBuilder<'a> {
         StreamingIngesterBuilder::new(fs)
     }
 
@@ -480,7 +480,7 @@ fn is_likely_text(size: usize) -> bool {
 ///     let file = tokio::fs::File::open("large_file.bin").await?;
 ///     let reader = tokio::io::BufReader::new(file);
 ///
-///     let mut ingester = AsyncStreamingIngester::new(fs)
+///     let mut ingester = AsyncStreamingIngester::builder(fs)
 ///         .with_path(path)
 ///         .build()
 ///         .await?;
@@ -636,7 +636,7 @@ mod tests {
         let fs = VersionedEmbrFS::new();
         let data = b"Hello, streaming world!";
 
-        let mut ingester = StreamingIngester::new(&fs)
+        let mut ingester = StreamingIngester::builder(&fs)
             .with_path("test.txt")
             .build()
             .unwrap();
@@ -662,7 +662,7 @@ mod tests {
             .map(|i| (i % 256) as u8)
             .collect();
 
-        let mut ingester = StreamingIngester::new(&fs)
+        let mut ingester = StreamingIngester::builder(&fs)
             .with_path("large.bin")
             .with_chunk_size(DEFAULT_CHUNK_SIZE)
             .build()
@@ -687,7 +687,7 @@ mod tests {
     fn test_streaming_progress() {
         let fs = VersionedEmbrFS::new();
 
-        let mut ingester = StreamingIngester::new(&fs)
+        let mut ingester = StreamingIngester::builder(&fs)
             .with_path("progress.txt")
             .with_chunk_size(1024)
             .build()
@@ -720,7 +720,7 @@ mod tests {
         let data = b"Data from a reader interface!";
         let reader = Cursor::new(data);
 
-        let mut ingester = StreamingIngester::new(&fs)
+        let mut ingester = StreamingIngester::builder(&fs)
             .with_path("from_reader.txt")
             .build()
             .unwrap();
