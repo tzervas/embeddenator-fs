@@ -314,6 +314,191 @@ impl VersionedEmbrFS {
         Ok((final_data, file_entry.version))
     }
 
+    /// Read a specific byte range from a file
+    ///
+    /// This method enables efficient partial file reads by only decoding the chunks
+    /// needed to satisfy the requested byte range. When the file has a chunk offset
+    /// index, chunks are located in O(log n) time.
+    ///
+    /// # Arguments
+    /// * `path` - The file path within the engram
+    /// * `offset` - The starting byte offset to read from
+    /// * `length` - The number of bytes to read
+    ///
+    /// # Returns
+    /// A tuple of (data, version) where data is the requested byte range.
+    /// If the range extends beyond the file, only available bytes are returned.
+    ///
+    /// # Performance
+    /// - With offset index: O(log n + k) where k = number of chunks in range
+    /// - Without offset index: O(n) where n = total chunks (must scan all)
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use embeddenator_fs::VersionedEmbrFS;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let fs = VersionedEmbrFS::new();
+    /// // Read bytes 1000-1999 from a file
+    /// let (data, version) = fs.read_range("large_file.bin", 1000, 1000)?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn read_range(
+        &self,
+        path: &str,
+        offset: usize,
+        length: usize,
+    ) -> Result<(Vec<u8>, u64), EmbrFSError> {
+        // 1. Get file entry
+        let (file_entry, _manifest_version) = self
+            .manifest
+            .get_file(path)
+            .ok_or_else(|| EmbrFSError::FileNotFound(path.to_string()))?;
+
+        if file_entry.deleted {
+            return Err(EmbrFSError::FileNotFound(path.to_string()));
+        }
+
+        // Handle edge cases
+        if offset >= file_entry.size || length == 0 {
+            return Ok((Vec::new(), file_entry.version));
+        }
+
+        // Clamp the actual read length to file bounds
+        let actual_length = length.min(file_entry.size - offset);
+
+        // 2. Determine which chunks to read
+        if file_entry.has_offset_index() {
+            // Fast path: use offset index
+            self.read_range_with_index(path, &file_entry, offset, actual_length)
+        } else {
+            // Slow path: must read sequentially and skip
+            self.read_range_sequential(path, &file_entry, offset, actual_length)
+        }
+    }
+
+    /// Read a byte range using the chunk offset index (fast path)
+    fn read_range_with_index(
+        &self,
+        _path: &str,
+        file_entry: &crate::fs::versioned::manifest::VersionedFileEntry,
+        offset: usize,
+        length: usize,
+    ) -> Result<(Vec<u8>, u64), EmbrFSError> {
+        let chunk_ranges = file_entry.chunks_for_range(offset, length);
+
+        if chunk_ranges.is_empty() {
+            return Ok((Vec::new(), file_entry.version));
+        }
+
+        let mut result = Vec::with_capacity(length);
+
+        for range in chunk_ranges {
+            // Get chunk from store
+            let (chunk, _chunk_version) = self
+                .chunk_store
+                .get(range.chunk_id)
+                .ok_or(EmbrFSError::ChunkNotFound(range.chunk_id))?;
+
+            // Decode the chunk
+            let decoded =
+                chunk
+                    .vector
+                    .decode_data(&self.config, Some(&file_entry.path), chunk.original_size);
+
+            // Apply correction
+            let corrected = self
+                .corrections
+                .get(range.chunk_id as u64)
+                .map(|(corr, _)| corr.apply(&decoded))
+                .unwrap_or(decoded);
+
+            // Extract the relevant portion
+            let chunk_data = if range.start_within_chunk == 0 && range.length == corrected.len() {
+                corrected
+            } else {
+                let end = (range.start_within_chunk + range.length).min(corrected.len());
+                corrected[range.start_within_chunk..end].to_vec()
+            };
+
+            result.extend_from_slice(&chunk_data);
+        }
+
+        // Ensure we don't return more than requested
+        result.truncate(length);
+
+        Ok((result, file_entry.version))
+    }
+
+    /// Read a byte range without offset index (slow path)
+    fn read_range_sequential(
+        &self,
+        _path: &str,
+        file_entry: &crate::fs::versioned::manifest::VersionedFileEntry,
+        offset: usize,
+        length: usize,
+    ) -> Result<(Vec<u8>, u64), EmbrFSError> {
+        let mut result = Vec::with_capacity(length);
+        let mut current_offset = 0usize;
+        let end_offset = offset + length;
+
+        for &chunk_id in &file_entry.chunks {
+            // Get chunk from store
+            let (chunk, _chunk_version) = self
+                .chunk_store
+                .get(chunk_id)
+                .ok_or(EmbrFSError::ChunkNotFound(chunk_id))?;
+
+            let chunk_size = chunk.original_size;
+            let chunk_end = current_offset + chunk_size;
+
+            // Skip chunks entirely before our range
+            if chunk_end <= offset {
+                current_offset = chunk_end;
+                continue;
+            }
+
+            // Stop if we've passed our range
+            if current_offset >= end_offset {
+                break;
+            }
+
+            // Decode the chunk
+            let decoded =
+                chunk
+                    .vector
+                    .decode_data(&self.config, Some(&file_entry.path), chunk_size);
+
+            // Apply correction
+            let corrected = self
+                .corrections
+                .get(chunk_id as u64)
+                .map(|(corr, _)| corr.apply(&decoded))
+                .unwrap_or(decoded);
+
+            // Calculate overlap with our range
+            let start_in_chunk = offset.saturating_sub(current_offset);
+            let end_in_chunk = (end_offset - current_offset).min(corrected.len());
+
+            if start_in_chunk < end_in_chunk {
+                result.extend_from_slice(&corrected[start_in_chunk..end_in_chunk]);
+            }
+
+            current_offset = chunk_end;
+
+            // Stop if we've read enough
+            if result.len() >= length {
+                break;
+            }
+        }
+
+        // Ensure we don't return more than requested
+        result.truncate(length);
+
+        Ok((result, file_entry.version))
+    }
+
     /// Write a file's contents
     ///
     /// If `expected_version` is provided, performs optimistic locking - the write
@@ -1357,5 +1542,40 @@ mod tests {
 
         fs.enable_holographic_mode();
         assert!(fs.is_holographic());
+    }
+
+    #[test]
+    fn test_read_range_basic() {
+        let fs = VersionedEmbrFS::new();
+
+        // Create a file with known content
+        let data = b"Hello, World! This is a test file for range queries.";
+        fs.write_file("range_test.txt", data, None).unwrap();
+
+        // Read specific ranges
+        let (result, _) = fs.read_range("range_test.txt", 0, 5).unwrap();
+        assert_eq!(&result[..], b"Hello");
+
+        let (result, _) = fs.read_range("range_test.txt", 7, 6).unwrap();
+        assert_eq!(&result[..], b"World!");
+
+        // Read beyond file size (should return what's available)
+        let (result, _) = fs.read_range("range_test.txt", 44, 100).unwrap();
+        assert_eq!(&result[..], b"queries.");
+
+        // Read at/beyond file end
+        let (result, _) = fs.read_range("range_test.txt", 1000, 10).unwrap();
+        assert!(result.is_empty());
+
+        // Read zero length
+        let (result, _) = fs.read_range("range_test.txt", 0, 0).unwrap();
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_read_range_not_found() {
+        let fs = VersionedEmbrFS::new();
+        let result = fs.read_range("nonexistent.txt", 0, 10);
+        assert!(result.is_err());
     }
 }
