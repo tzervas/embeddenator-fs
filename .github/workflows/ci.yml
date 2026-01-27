@@ -20,7 +20,8 @@ jobs:
       - name: Clone dependency repos
         run: |
           cd ..
-          for repo in embeddenator-vsa embeddenator-core embeddenator-io embeddenator-retrieval embeddenator-interop embeddenator-obs; do
+          # Only clone direct path dependencies
+          for repo in embeddenator-vsa embeddenator-io embeddenator-retrieval; do
             if [ ! -d "$repo" ]; then
               git clone --depth 1 https://github.com/tzervas/$repo.git || true
             fi
@@ -49,13 +50,13 @@ jobs:
         run: cargo fmt --check
 
       - name: Run clippy
-        run: cargo clippy --locked --all-features -- -D warnings
+        run: cargo clippy --all-features -- -D warnings
 
-      - name: Build (locked)
-        run: cargo build --locked --release --all-features
+      - name: Build
+        run: cargo build --release --all-features
 
-      - name: Run tests (locked)
-        run: cargo nextest run --locked --all-features
+      - name: Run tests
+        run: cargo nextest run --all-features
 
       - name: Build documentation
-        run: cargo doc --locked --no-deps --all-features
+        run: cargo doc --no-deps --all-features
