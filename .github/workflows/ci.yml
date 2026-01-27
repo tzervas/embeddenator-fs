@@ -49,14 +49,23 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check
 
-      - name: Run clippy
-        run: cargo clippy --all-features -- -D warnings
+      # Note: Using specific features instead of --all-features to avoid
+      # gpt 4.1 -> simple-bytes -> bincode 3.0.0 (has intentional compile_error)
+      # The disk-image-portable feature provides disk image support without io_uring
+      - name: Run clippy (default)
+        run: cargo clippy -- -D warnings
+
+      - name: Run clippy (fuse)
+        run: cargo clippy --features fuse -- -D warnings
+
+      - name: Run clippy (disk-image-portable)
+        run: cargo clippy --features disk-image-portable -- -D warnings
 
       - name: Build
-        run: cargo build --release --all-features
+        run: cargo build --release --features "fuse disk-image-portable"
 
       - name: Run tests
-        run: cargo nextest run --all-features
+        run: cargo nextest run --features "fuse disk-image-portable"
 
       - name: Build documentation
-        run: cargo doc --no-deps --all-features
+        run: cargo doc --no-deps --features "fuse disk-image-portable"
