@@ -50,7 +50,9 @@
 
 use crate::correction::ChunkCorrection;
 use crate::versioned::{ChunkId, VersionedChunk, VersionedFileEntry};
-use crate::versioned_embrfs::{EmbrFSError, VersionedEmbrFS, DEFAULT_CHUNK_SIZE};
+use crate::versioned_embrfs::{
+    EmbrFSError, VersionedEmbrFS, DEFAULT_CHUNK_SIZE, ENCODING_FORMAT_REVERSIBLE_VSA,
+};
 use embeddenator_io::{wrap_or_legacy, BinaryWriteOptions, CompressionCodec, PayloadKind};
 use embeddenator_vsa::SparseVec;
 use sha2::{Digest, Sha256};
@@ -332,7 +334,7 @@ impl<'a> StreamingIngester<'a> {
 
         // Create manifest entry
         let is_text = total_bytes > 0 && is_likely_text(total_bytes);
-        let file_entry = if let Some(codec) = self.compression {
+        let mut file_entry = if let Some(codec) = self.compression {
             let codec_byte = match codec {
                 CompressionCodec::None => 0,
                 CompressionCodec::Zstd => 1,
@@ -354,6 +356,11 @@ impl<'a> StreamingIngester<'a> {
                 self.chunk_ids.clone(),
             )
         };
+
+        // Set encoding format for holographic mode files
+        if self.fs.is_holographic() {
+            file_entry.encoding_format = Some(ENCODING_FORMAT_REVERSIBLE_VSA);
+        }
 
         let version = if let Some((entry, _)) = existing {
             self.fs
@@ -394,11 +401,29 @@ impl<'a> StreamingIngester<'a> {
             data.clone()
         };
 
-        // Encode chunk using VSA
-        let chunk_vec = SparseVec::encode_data(&encoded_data, self.fs.config(), Some(&self.path));
+        // Encode chunk using appropriate encoder based on mode
+        let chunk_vec = if self.fs.is_holographic() {
+            // Use ReversibleVSAEncoder for ~94% uncorrected accuracy
+            self.fs
+                .reversible_encoder()
+                .write()
+                .unwrap()
+                .encode(&encoded_data)
+        } else {
+            // Legacy mode: use SparseVec::encode_data
+            SparseVec::encode_data(&encoded_data, self.fs.config(), Some(&self.path))
+        };
 
-        // Decode and compute correction
-        let decoded = chunk_vec.decode_data(self.fs.config(), Some(&self.path), encoded_data.len());
+        // Decode and compute correction using matching decoder
+        let decoded = if self.fs.is_holographic() {
+            self.fs
+                .reversible_encoder()
+                .read()
+                .unwrap()
+                .decode(&chunk_vec, encoded_data.len())
+        } else {
+            chunk_vec.decode_data(self.fs.config(), Some(&self.path), encoded_data.len())
+        };
         let correction = ChunkCorrection::new(chunk_id as u64, &encoded_data, &decoded);
 
         // Track correction overhead
@@ -684,6 +709,8 @@ pub struct StreamingDecoder<'a> {
     /// Compression codec used (for future decompression support)
     #[allow(dead_code)]
     compression_codec: Option<u8>,
+    /// Encoding format (0=legacy, 1=reversible VSA)
+    encoding_format: Option<u8>,
 }
 
 impl<'a> StreamingDecoder<'a> {
@@ -713,6 +740,7 @@ impl<'a> StreamingDecoder<'a> {
                 .map(|c| c != 0)
                 .unwrap_or(false),
             compression_codec: file_entry.compression_codec,
+            encoding_format: file_entry.encoding_format,
         })
     }
 
@@ -768,11 +796,18 @@ impl<'a> StreamingDecoder<'a> {
             .get(chunk_id)
             .ok_or(EmbrFSError::ChunkNotFound(chunk_id))?;
 
-        // Decode chunk
-        let decoded =
+        // Decode chunk using matching decoder based on encoding format
+        let decoded = if self.encoding_format == Some(ENCODING_FORMAT_REVERSIBLE_VSA) {
+            self.fs
+                .reversible_encoder()
+                .read()
+                .unwrap()
+                .decode(&chunk.vector, chunk.original_size)
+        } else {
             chunk
                 .vector
-                .decode_data(self.fs.config(), Some(&self.path), chunk.original_size);
+                .decode_data(self.fs.config(), Some(&self.path), chunk.original_size)
+        };
 
         // Apply correction
         let corrected = self
