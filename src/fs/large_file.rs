@@ -211,11 +211,13 @@ impl<'a> LargeFileHandler<'a> {
         for chunk_data in chunks {
             let chunk_id = self.fs.allocate_chunk_id();
 
-            // Encode
-            let chunk_vec = SparseVec::encode_data(chunk_data, self.fs.config(), Some(path));
+            // Encode (using mode-appropriate encoder)
+            let chunk_vec = self.fs.encode_chunk(chunk_data, Some(path));
 
-            // Verify
-            let decoded = chunk_vec.decode_data(self.fs.config(), Some(path), chunk_data.len());
+            // Verify (using mode-appropriate decoder)
+            let decoded = self
+                .fs
+                .decode_chunk(&chunk_vec, Some(path), chunk_data.len());
 
             // Compute hash
             let mut hasher = Sha256::new();
@@ -299,11 +301,13 @@ impl<'a> LargeFileHandler<'a> {
         for chunk_data in chunks {
             let chunk_id = self.fs.allocate_chunk_id();
 
-            // Encode
-            let chunk_vec = SparseVec::encode_data(chunk_data, self.fs.config(), Some(path));
+            // Encode (using mode-appropriate encoder)
+            let chunk_vec = self.fs.encode_chunk(chunk_data, Some(path));
 
-            // Verify
-            let decoded = chunk_vec.decode_data(self.fs.config(), Some(path), chunk_data.len());
+            // Verify (using mode-appropriate decoder)
+            let decoded = self
+                .fs
+                .decode_chunk(&chunk_vec, Some(path), chunk_data.len());
 
             // Compute hash
             let mut hasher = Sha256::new();
