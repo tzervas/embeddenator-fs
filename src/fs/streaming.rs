@@ -394,11 +394,29 @@ impl<'a> StreamingIngester<'a> {
             data.clone()
         };
 
-        // Encode chunk using VSA
-        let chunk_vec = SparseVec::encode_data(&encoded_data, self.fs.config(), Some(&self.path));
+        // Encode chunk using appropriate encoder based on mode
+        let chunk_vec = if self.fs.is_holographic() {
+            // Use ReversibleVSAEncoder for ~94% uncorrected accuracy
+            self.fs
+                .reversible_encoder()
+                .write()
+                .unwrap()
+                .encode(&encoded_data)
+        } else {
+            // Legacy mode: use SparseVec::encode_data
+            SparseVec::encode_data(&encoded_data, self.fs.config(), Some(&self.path))
+        };
 
-        // Decode and compute correction
-        let decoded = chunk_vec.decode_data(self.fs.config(), Some(&self.path), encoded_data.len());
+        // Decode and compute correction using matching decoder
+        let decoded = if self.fs.is_holographic() {
+            self.fs
+                .reversible_encoder()
+                .read()
+                .unwrap()
+                .decode(&chunk_vec, encoded_data.len())
+        } else {
+            chunk_vec.decode_data(self.fs.config(), Some(&self.path), encoded_data.len())
+        };
         let correction = ChunkCorrection::new(chunk_id as u64, &encoded_data, &decoded);
 
         // Track correction overhead

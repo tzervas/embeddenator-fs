@@ -1181,11 +1181,24 @@ impl VersionedEmbrFS {
         for chunk_data in chunks {
             let chunk_id = self.allocate_chunk_id();
 
-            // Encode chunk
-            let chunk_vec = SparseVec::encode_data(chunk_data, &self.config, Some(path));
+            // Encode chunk using appropriate encoder based on mode
+            let chunk_vec = if self.holographic_mode {
+                // Use ReversibleVSAEncoder for ~94% uncorrected accuracy
+                self.reversible_encoder.write().unwrap().encode(chunk_data)
+            } else {
+                // Legacy mode: use SparseVec::encode_data
+                SparseVec::encode_data(chunk_data, &self.config, Some(path))
+            };
 
-            // Immediately verify
-            let decoded = chunk_vec.decode_data(&self.config, Some(path), chunk_data.len());
+            // Immediately verify using matching decoder
+            let decoded = if self.holographic_mode {
+                self.reversible_encoder
+                    .read()
+                    .unwrap()
+                    .decode(&chunk_vec, chunk_data.len())
+            } else {
+                chunk_vec.decode_data(&self.config, Some(path), chunk_data.len())
+            };
 
             // Compute content hash
             let mut hasher = Sha256::new();
@@ -1338,11 +1351,24 @@ impl VersionedEmbrFS {
         for chunk_data in chunks {
             let chunk_id = self.allocate_chunk_id();
 
-            // Encode chunk
-            let chunk_vec = SparseVec::encode_data(chunk_data, &self.config, Some(path));
+            // Encode chunk using appropriate encoder based on mode
+            let chunk_vec = if self.holographic_mode {
+                // Use ReversibleVSAEncoder for ~94% uncorrected accuracy
+                self.reversible_encoder.write().unwrap().encode(chunk_data)
+            } else {
+                // Legacy mode: use SparseVec::encode_data
+                SparseVec::encode_data(chunk_data, &self.config, Some(path))
+            };
 
-            // Immediately verify
-            let decoded = chunk_vec.decode_data(&self.config, Some(path), chunk_data.len());
+            // Immediately verify using matching decoder
+            let decoded = if self.holographic_mode {
+                self.reversible_encoder
+                    .read()
+                    .unwrap()
+                    .decode(&chunk_vec, chunk_data.len())
+            } else {
+                chunk_vec.decode_data(&self.config, Some(path), chunk_data.len())
+            };
 
             // Compute content hash
             let mut hasher = Sha256::new();
