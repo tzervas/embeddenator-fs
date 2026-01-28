@@ -279,6 +279,9 @@ impl VersionedEmbrFS {
         // 2. Read and decode chunks
         let mut file_data = Vec::with_capacity(file_entry.size);
 
+        // Check if file was encoded with reversible VSA
+        let use_reversible = file_entry.encoding_format == Some(ENCODING_FORMAT_REVERSIBLE_VSA);
+
         for &chunk_id in &file_entry.chunks {
             // Get chunk from store
             let (chunk, _chunk_version) = self
@@ -286,11 +289,17 @@ impl VersionedEmbrFS {
                 .get(chunk_id)
                 .ok_or(EmbrFSError::ChunkNotFound(chunk_id))?;
 
-            // Decode chunk
-            let decoded =
+            // Decode chunk using matching decoder
+            let decoded = if use_reversible {
+                self.reversible_encoder
+                    .read()
+                    .unwrap()
+                    .decode(&chunk.vector, DEFAULT_CHUNK_SIZE)
+            } else {
                 chunk
                     .vector
-                    .decode_data(&self.config, Some(&file_entry.path), DEFAULT_CHUNK_SIZE);
+                    .decode_data(&self.config, Some(&file_entry.path), DEFAULT_CHUNK_SIZE)
+            };
 
             // Apply correction
             let corrected = self
@@ -1243,8 +1252,13 @@ impl VersionedEmbrFS {
 
         // 6. Update manifest
         let is_text = is_text_data(data);
-        let new_entry =
+        let mut new_entry =
             VersionedFileEntry::new(path.to_string(), is_text, data.len(), chunk_ids.clone());
+
+        // Set encoding format for holographic mode files
+        if self.holographic_mode {
+            new_entry.encoding_format = Some(ENCODING_FORMAT_REVERSIBLE_VSA);
+        }
 
         let file_version = if let Some((entry, _)) = existing {
             self.manifest.update_file(path, new_entry, entry.version)?;
@@ -1408,7 +1422,7 @@ impl VersionedEmbrFS {
 
         // 9. Update manifest with compression metadata
         let is_text = is_text_data(data);
-        let new_entry = if codec_byte == 0 {
+        let mut new_entry = if codec_byte == 0 {
             VersionedFileEntry::new(path.to_string(), is_text, data.len(), chunk_ids.clone())
         } else {
             VersionedFileEntry::new_compressed(
@@ -1420,6 +1434,11 @@ impl VersionedEmbrFS {
                 chunk_ids.clone(),
             )
         };
+
+        // Set encoding format for holographic mode files
+        if self.holographic_mode {
+            new_entry.encoding_format = Some(ENCODING_FORMAT_REVERSIBLE_VSA);
+        }
 
         let file_version = if let Some((entry, _)) = existing {
             self.manifest.update_file(path, new_entry, entry.version)?;
