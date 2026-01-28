@@ -1845,6 +1845,63 @@ impl VersionedEmbrFS {
             std::thread::yield_now();
         }
     }
+
+    // ========================================================================
+    // Streaming Decode Convenience Methods
+    // ========================================================================
+
+    /// Create a streaming decoder for a file
+    ///
+    /// This is a convenience method that creates a [`StreamingDecoder`] for
+    /// memory-efficient reading of large files without loading them entirely.
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use embeddenator_fs::VersionedEmbrFS;
+    /// let fs = VersionedEmbrFS::new();
+    /// let mut decoder = fs.stream_decode("large_file.bin")?;
+    /// let first_chunk = decoder.read_n_bytes(1024)?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn stream_decode(
+        &self,
+        path: &str,
+    ) -> Result<crate::streaming::StreamingDecoder<'_>, EmbrFSError> {
+        crate::streaming::StreamingDecoder::new(self, path)
+    }
+
+    /// Create a streaming decoder starting at a specific offset
+    ///
+    /// This is a convenience method that creates a [`StreamingDecoder`] positioned
+    /// at the specified offset with an optional read limit.
+    ///
+    /// # Arguments
+    /// * `path` - Path to the file
+    /// * `offset` - Starting byte offset
+    /// * `limit` - Optional maximum bytes to read (None = read to end)
+    ///
+    /// # Example
+    /// ```rust,no_run
+    /// # use embeddenator_fs::VersionedEmbrFS;
+    /// let fs = VersionedEmbrFS::new();
+    /// // Read 200 bytes starting at offset 500
+    /// let mut decoder = fs.stream_decode_range("data.bin", 500, Some(200))?;
+    /// let data = decoder.read_n_bytes(200)?;
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
+    pub fn stream_decode_range(
+        &self,
+        path: &str,
+        offset: usize,
+        limit: Option<usize>,
+    ) -> Result<crate::streaming::StreamingDecoder<'_>, EmbrFSError> {
+        use crate::streaming::StreamingDecoderBuilder;
+        let mut builder = StreamingDecoderBuilder::new(self, path).with_offset(offset);
+        if let Some(max_bytes) = limit {
+            builder = builder.with_max_bytes(max_bytes);
+        }
+        builder.build()
+    }
 }
 
 impl Default for VersionedEmbrFS {

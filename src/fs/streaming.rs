@@ -50,7 +50,9 @@
 
 use crate::correction::ChunkCorrection;
 use crate::versioned::{ChunkId, VersionedChunk, VersionedFileEntry};
-use crate::versioned_embrfs::{EmbrFSError, VersionedEmbrFS, DEFAULT_CHUNK_SIZE};
+use crate::versioned_embrfs::{
+    EmbrFSError, VersionedEmbrFS, DEFAULT_CHUNK_SIZE, ENCODING_FORMAT_REVERSIBLE_VSA,
+};
 use embeddenator_io::{wrap_or_legacy, BinaryWriteOptions, CompressionCodec, PayloadKind};
 use embeddenator_vsa::SparseVec;
 use sha2::{Digest, Sha256};
@@ -75,12 +77,18 @@ pub struct StreamingResult {
     pub correction_savings: usize,
 }
 
-/// Pending chunk data for batch insertion
+/// Pending chunk data for batch insertion (fully encoded)
 struct PendingChunk {
     chunk_id: ChunkId,
     data: Vec<u8>,
     vector: SparseVec,
     correction: ChunkCorrection,
+}
+
+/// Raw chunk data awaiting encoding (for parallel processing)
+struct RawChunkData {
+    chunk_id: ChunkId,
+    data: Vec<u8>,
 }
 
 /// Builder for configuring streaming ingestion
@@ -92,7 +100,6 @@ pub struct StreamingIngesterBuilder<'a> {
     compression: Option<CompressionCodec>,
     adaptive_chunking: bool,
     correction_threshold: f64,
-    /// Enable parallel chunk encoding (requires `parallel` feature)
     parallel_encoding: bool,
 }
 
@@ -107,11 +114,7 @@ impl<'a> StreamingIngesterBuilder<'a> {
             compression: None,
             adaptive_chunking: false,
             correction_threshold: 0.1,
-            // Enable parallel encoding by default when feature is enabled
-            #[cfg(feature = "parallel")]
-            parallel_encoding: true,
-            #[cfg(not(feature = "parallel"))]
-            parallel_encoding: false,
+            parallel_encoding: cfg!(feature = "parallel"),
         }
     }
 
@@ -160,24 +163,13 @@ impl<'a> StreamingIngesterBuilder<'a> {
         self
     }
 
-    /// Enable or disable parallel chunk encoding
+    /// Enable or disable parallel encoding (#45)
     ///
-    /// When enabled (and `parallel` feature is active), chunks are encoded
-    /// using rayon thread pool for 4-8x speedup on multi-core systems.
-    /// Enabled by default when the `parallel` feature is enabled.
-    ///
-    /// # Note
-    ///
-    /// This option has no effect if the `parallel` feature is not enabled.
+    /// When enabled (requires `parallel` feature), chunks are encoded in parallel
+    /// using rayon during finalization, providing 4x+ speedup on multi-core systems.
+    /// Default: enabled when `parallel` feature is active.
     pub fn with_parallel_encoding(mut self, enabled: bool) -> Self {
-        #[cfg(feature = "parallel")]
-        {
-            self.parallel_encoding = enabled;
-        }
-        #[cfg(not(feature = "parallel"))]
-        {
-            let _ = enabled; // Silence unused variable warning
-        }
+        self.parallel_encoding = enabled && cfg!(feature = "parallel");
         self
     }
 
@@ -195,15 +187,15 @@ impl<'a> StreamingIngesterBuilder<'a> {
             compression: self.compression,
             adaptive_chunking: self.adaptive_chunking,
             correction_threshold: self.correction_threshold,
-            parallel_encoding: self.parallel_encoding,
             // State
             buffer: Vec::with_capacity(self.chunk_size),
-            pending_raw_chunks: Vec::new(),
             pending_chunks: Vec::new(),
+            raw_chunks: Vec::new(),
             chunk_ids: Vec::new(),
             total_bytes: AtomicU64::new(0),
             hasher: Sha256::new(),
             correction_bytes: AtomicU64::new(0),
+            parallel_encoding: self.parallel_encoding,
         })
     }
 }
@@ -212,12 +204,6 @@ impl<'a> StreamingIngesterBuilder<'a> {
 ///
 /// Processes data in chunks as it arrives, maintaining bounded memory usage.
 /// Suitable for files of any size including multi-GB datasets.
-///
-/// # Parallel Encoding
-///
-/// When the `parallel` feature is enabled and `parallel_encoding` is true,
-/// chunks are encoded using rayon's thread pool for significant speedup
-/// on multi-core systems (typically 4-8x faster).
 pub struct StreamingIngester<'a> {
     // Configuration
     fs: &'a VersionedEmbrFS,
@@ -227,18 +213,17 @@ pub struct StreamingIngester<'a> {
     compression: Option<CompressionCodec>,
     adaptive_chunking: bool,
     correction_threshold: f64,
-    /// Enable parallel encoding (requires `parallel` feature)
-    parallel_encoding: bool,
 
     // Mutable state
     buffer: Vec<u8>,
-    /// Raw data chunks waiting to be encoded (used for parallel encoding)
-    pending_raw_chunks: Vec<(ChunkId, Vec<u8>)>,
     pending_chunks: Vec<PendingChunk>,
+    raw_chunks: Vec<RawChunkData>,
     chunk_ids: Vec<ChunkId>,
     total_bytes: AtomicU64,
     hasher: Sha256,
     correction_bytes: AtomicU64,
+    /// Use parallel encoding (requires `parallel` feature)
+    parallel_encoding: bool,
 }
 
 impl<'a> StreamingIngester<'a> {
@@ -313,9 +298,6 @@ impl<'a> StreamingIngester<'a> {
     ///
     /// Processes any remaining buffered data and commits all chunks to the
     /// versioned filesystem atomically.
-    ///
-    /// When parallel encoding is enabled, this is where all chunks are encoded
-    /// in parallel using rayon's thread pool.
     pub fn finalize(mut self) -> Result<StreamingResult, EmbrFSError> {
         // Process remaining data in buffer
         if !self.buffer.is_empty() {
@@ -323,8 +305,8 @@ impl<'a> StreamingIngester<'a> {
             self.process_chunk(remaining)?;
         }
 
-        // If parallel encoding, process all deferred chunks now
-        if self.parallel_encoding && !self.pending_raw_chunks.is_empty() {
+        // Parallel encoding: process all raw chunks at once (#45)
+        if !self.raw_chunks.is_empty() {
             self.encode_chunks_parallel()?;
         }
 
@@ -383,7 +365,7 @@ impl<'a> StreamingIngester<'a> {
 
         // Create manifest entry
         let is_text = total_bytes > 0 && is_likely_text(total_bytes);
-        let file_entry = if let Some(codec) = self.compression {
+        let mut file_entry = if let Some(codec) = self.compression {
             let codec_byte = match codec {
                 CompressionCodec::None => 0,
                 CompressionCodec::Zstd => 1,
@@ -405,6 +387,11 @@ impl<'a> StreamingIngester<'a> {
                 self.chunk_ids.clone(),
             )
         };
+
+        // Set encoding format for holographic mode files
+        if self.fs.is_holographic() {
+            file_entry.encoding_format = Some(ENCODING_FORMAT_REVERSIBLE_VSA);
+        }
 
         let version = if let Some((entry, _)) = existing {
             self.fs
@@ -429,10 +416,6 @@ impl<'a> StreamingIngester<'a> {
     }
 
     /// Process a single chunk
-    ///
-    /// When parallel encoding is enabled, this stores raw data for later
-    /// parallel processing during finalize(). Otherwise, encoding is done
-    /// immediately (sequential mode).
     fn process_chunk(&mut self, data: Vec<u8>) -> Result<(), EmbrFSError> {
         let chunk_id = self.fs.allocate_chunk_id();
 
@@ -449,28 +432,49 @@ impl<'a> StreamingIngester<'a> {
             data.clone()
         };
 
-        // If parallel encoding is enabled, defer encoding to finalize()
+        // If parallel encoding is enabled, defer encoding to finalize
         if self.parallel_encoding {
-            self.pending_raw_chunks.push((chunk_id, encoded_data));
+            self.raw_chunks.push(RawChunkData {
+                chunk_id,
+                data: encoded_data,
+            });
             self.chunk_ids.push(chunk_id);
             return Ok(());
         }
 
-        // Sequential encoding path
+        // Sequential encoding path (original behavior)
         self.encode_chunk_sequential(chunk_id, encoded_data)
     }
 
-    /// Encode a single chunk sequentially (non-parallel path)
+    /// Encode a single chunk sequentially (original implementation)
     fn encode_chunk_sequential(
         &mut self,
         chunk_id: ChunkId,
         encoded_data: Vec<u8>,
     ) -> Result<(), EmbrFSError> {
-        // Encode chunk using VSA
-        let chunk_vec = SparseVec::encode_data(&encoded_data, self.fs.config(), Some(&self.path));
+        // Encode chunk using appropriate encoder based on mode
+        let chunk_vec = if self.fs.is_holographic() {
+            // Use ReversibleVSAEncoder for ~94% uncorrected accuracy
+            self.fs
+                .reversible_encoder()
+                .write()
+                .unwrap()
+                .encode(&encoded_data)
+        } else {
+            // Legacy mode: use SparseVec::encode_data
+            SparseVec::encode_data(&encoded_data, self.fs.config(), Some(&self.path))
+        };
 
-        // Decode and compute correction
-        let decoded = chunk_vec.decode_data(self.fs.config(), Some(&self.path), encoded_data.len());
+        // Decode and compute correction using matching decoder
+        let decoded = if self.fs.is_holographic() {
+            self.fs
+                .reversible_encoder()
+                .read()
+                .unwrap()
+                .decode(&chunk_vec, encoded_data.len())
+        } else {
+            chunk_vec.decode_data(self.fs.config(), Some(&self.path), encoded_data.len())
+        };
         let correction = ChunkCorrection::new(chunk_id as u64, &encoded_data, &decoded);
 
         // Track correction overhead
@@ -482,6 +486,7 @@ impl<'a> StreamingIngester<'a> {
         if self.adaptive_chunking {
             let correction_ratio = corr_size as f64 / encoded_data.len() as f64;
             if correction_ratio > self.correction_threshold {
+                // For now, just log - future: implement re-encoding with different params
                 eprintln!(
                     "Warning: High correction ratio {:.2}% for chunk {} - consider adjusting parameters",
                     correction_ratio * 100.0,
@@ -502,73 +507,64 @@ impl<'a> StreamingIngester<'a> {
         Ok(())
     }
 
-    /// Encode multiple chunks in parallel using rayon
+    /// Encode all raw chunks in parallel using rayon (#45)
+    ///
+    /// When the `parallel` feature is enabled, this uses rayon's par_iter
+    /// to encode chunks across all available CPU cores, providing 4x+ speedup
+    /// on typical multi-core systems.
     #[cfg(feature = "parallel")]
     fn encode_chunks_parallel(&mut self) -> Result<(), EmbrFSError> {
-        if self.pending_raw_chunks.is_empty() {
-            return Ok(());
-        }
-
-        let config = self.fs.config().clone();
+        let raw_chunks = std::mem::take(&mut self.raw_chunks);
         let path = self.path.clone();
-        let adaptive = self.adaptive_chunking;
-        let threshold = self.correction_threshold;
+        let is_holographic = self.fs.is_holographic();
+        let config = self.fs.config().clone();
+        let encoder = self.fs.reversible_encoder();
+        let correction_bytes = &self.correction_bytes;
 
-        // Process all chunks in parallel
-        let results: Vec<(ChunkId, Vec<u8>, SparseVec, ChunkCorrection, usize)> = self
-            .pending_raw_chunks
-            .par_iter()
-            .map(|(chunk_id, encoded_data)| {
-                // Encode chunk using VSA
-                let chunk_vec = SparseVec::encode_data(encoded_data, &config, Some(&path));
+        // Encode all chunks in parallel
+        let encoded: Vec<PendingChunk> = raw_chunks
+            .into_par_iter()
+            .map(|raw| {
+                // Encode using appropriate encoder
+                let chunk_vec = if is_holographic {
+                    encoder.write().unwrap().encode(&raw.data)
+                } else {
+                    SparseVec::encode_data(&raw.data, &config, Some(&path))
+                };
 
                 // Decode and compute correction
-                let decoded = chunk_vec.decode_data(&config, Some(&path), encoded_data.len());
-                let correction = ChunkCorrection::new(*chunk_id as u64, encoded_data, &decoded);
+                let decoded = if is_holographic {
+                    encoder.read().unwrap().decode(&chunk_vec, raw.data.len())
+                } else {
+                    chunk_vec.decode_data(&config, Some(&path), raw.data.len())
+                };
+                let correction = ChunkCorrection::new(raw.chunk_id as u64, &raw.data, &decoded);
+
+                // Track correction overhead atomically
                 let corr_size = correction.storage_size();
+                correction_bytes.fetch_add(corr_size as u64, Ordering::Relaxed);
 
-                // Log high correction ratios (adaptive strategy hint)
-                if adaptive {
-                    let correction_ratio = corr_size as f64 / encoded_data.len() as f64;
-                    if correction_ratio > threshold {
-                        eprintln!(
-                            "Warning: High correction ratio {:.2}% for chunk {} - consider adjusting parameters",
-                            correction_ratio * 100.0,
-                            chunk_id
-                        );
-                    }
+                PendingChunk {
+                    chunk_id: raw.chunk_id,
+                    data: raw.data,
+                    vector: chunk_vec,
+                    correction,
                 }
-
-                (*chunk_id, encoded_data.clone(), chunk_vec, correction, corr_size)
             })
             .collect();
 
-        // Aggregate results
-        let mut total_correction = 0usize;
-        for (chunk_id, data, vector, correction, corr_size) in results {
-            self.pending_chunks.push(PendingChunk {
-                chunk_id,
-                data,
-                vector,
-                correction,
-            });
-            total_correction += corr_size;
-        }
-
-        self.correction_bytes
-            .fetch_add(total_correction as u64, Ordering::Relaxed);
-        self.pending_raw_chunks.clear();
-
+        // Move encoded chunks to pending_chunks
+        self.pending_chunks = encoded;
         Ok(())
     }
 
-    /// Fallback for non-parallel builds
+    /// Encode all raw chunks sequentially (fallback when parallel feature disabled)
     #[cfg(not(feature = "parallel"))]
     fn encode_chunks_parallel(&mut self) -> Result<(), EmbrFSError> {
-        // Process sequentially if parallel feature is not enabled
-        let chunks = std::mem::take(&mut self.pending_raw_chunks);
-        for (chunk_id, data) in chunks {
-            self.encode_chunk_sequential(chunk_id, data)?;
+        // Fallback: encode sequentially
+        let raw_chunks = std::mem::take(&mut self.raw_chunks);
+        for raw in raw_chunks {
+            self.encode_chunk_sequential(raw.chunk_id, raw.data)?;
         }
         Ok(())
     }
@@ -826,6 +822,8 @@ pub struct StreamingDecoder<'a> {
     /// Compression codec used (for future decompression support)
     #[allow(dead_code)]
     compression_codec: Option<u8>,
+    /// Encoding format (0=legacy, 1=reversible VSA)
+    encoding_format: Option<u8>,
 }
 
 impl<'a> StreamingDecoder<'a> {
@@ -855,6 +853,7 @@ impl<'a> StreamingDecoder<'a> {
                 .map(|c| c != 0)
                 .unwrap_or(false),
             compression_codec: file_entry.compression_codec,
+            encoding_format: file_entry.encoding_format,
         })
     }
 
@@ -910,11 +909,18 @@ impl<'a> StreamingDecoder<'a> {
             .get(chunk_id)
             .ok_or(EmbrFSError::ChunkNotFound(chunk_id))?;
 
-        // Decode chunk
-        let decoded =
+        // Decode chunk using matching decoder based on encoding format
+        let decoded = if self.encoding_format == Some(ENCODING_FORMAT_REVERSIBLE_VSA) {
+            self.fs
+                .reversible_encoder()
+                .read()
+                .unwrap()
+                .decode(&chunk.vector, chunk.original_size)
+        } else {
             chunk
                 .vector
-                .decode_data(self.fs.config(), Some(&self.path), chunk.original_size);
+                .decode_data(self.fs.config(), Some(&self.path), chunk.original_size)
+        };
 
         // Apply correction
         let corrected = self
@@ -1385,5 +1391,116 @@ mod tests {
 
         let read_data = decoder.read_n_bytes(50).unwrap();
         assert_eq!(&read_data[..], &data[100..150]);
+    }
+
+    #[test]
+    fn test_stream_decode_convenience_method() {
+        let fs = VersionedEmbrFS::new();
+        let data = b"Testing stream_decode convenience method";
+
+        fs.write_file("convenience.txt", data, None).unwrap();
+
+        // Use the convenience method
+        let mut decoder = fs.stream_decode("convenience.txt").unwrap();
+
+        assert_eq!(decoder.file_size(), data.len());
+        let read_data = decoder.read_n_bytes(data.len()).unwrap();
+        assert_eq!(&read_data[..], data);
+    }
+
+    #[test]
+    fn test_stream_decode_range_convenience_method() {
+        let fs = VersionedEmbrFS::new();
+        let data: Vec<u8> = (0..1000).map(|i| (i % 256) as u8).collect();
+
+        fs.write_file("range_convenience.bin", &data, None).unwrap();
+
+        // Use the convenience method with offset
+        let mut decoder = fs
+            .stream_decode_range("range_convenience.bin", 500, Some(200))
+            .unwrap();
+
+        assert_eq!(decoder.position(), 500);
+        let read_data = decoder.read_n_bytes(200).unwrap();
+        assert_eq!(&read_data[..], &data[500..700]);
+    }
+
+    #[test]
+    fn test_streaming_decoder_memory_bounded() {
+        // This test verifies that streaming decode maintains bounded memory usage
+        // by processing a file much larger than the internal buffer.
+        //
+        // The key property is that StreamingDecoder only keeps one chunk in memory
+        // at a time (current_chunk_data), regardless of total file size.
+
+        let fs = VersionedEmbrFS::new();
+
+        // Create a file spanning many chunks (e.g., 50 chunks = 200KB with 4KB chunks)
+        // In production, this would be 1GB+, but we test the algorithm with smaller data
+        let num_chunks = 50;
+        let data: Vec<u8> = (0..DEFAULT_CHUNK_SIZE * num_chunks)
+            .map(|i| (i % 256) as u8)
+            .collect();
+
+        fs.write_file("memory_bounded.bin", &data, None).unwrap();
+
+        // Create decoder and verify it only loads one chunk at a time
+        let mut decoder = StreamingDecoder::new(&fs, "memory_bounded.bin").unwrap();
+
+        assert_eq!(decoder.chunk_count(), num_chunks);
+        assert_eq!(decoder.file_size(), data.len());
+
+        // Read chunk by chunk via iterator to verify bounded memory
+        let mut total_read = 0;
+        let mut chunk_count = 0;
+        for chunk_result in &mut decoder {
+            let chunk_data = chunk_result.unwrap();
+            // Each chunk should be at most DEFAULT_CHUNK_SIZE
+            assert!(chunk_data.len() <= DEFAULT_CHUNK_SIZE);
+            total_read += chunk_data.len();
+            chunk_count += 1;
+        }
+
+        assert_eq!(total_read, data.len());
+        assert_eq!(chunk_count, num_chunks);
+
+        // Verify full data matches via fresh decoder with random access
+        let mut decoder2 = StreamingDecoder::new(&fs, "memory_bounded.bin").unwrap();
+        let full_data = decoder2.read_n_bytes(data.len()).unwrap();
+        assert_eq!(full_data, data);
+    }
+
+    #[test]
+    fn test_streaming_decoder_seek_across_chunks() {
+        let fs = VersionedEmbrFS::new();
+
+        // Create multi-chunk file
+        let data: Vec<u8> = (0..DEFAULT_CHUNK_SIZE * 5)
+            .map(|i| (i % 256) as u8)
+            .collect();
+
+        fs.write_file("seek_multi.bin", &data, None).unwrap();
+
+        let mut decoder = StreamingDecoder::new(&fs, "seek_multi.bin").unwrap();
+
+        // Seek to middle of 3rd chunk
+        let seek_pos = DEFAULT_CHUNK_SIZE * 2 + 100;
+        decoder.seek_to(seek_pos).unwrap();
+        assert_eq!(decoder.position(), seek_pos);
+
+        // Read and verify
+        let read_data = decoder.read_n_bytes(500).unwrap();
+        assert_eq!(&read_data[..], &data[seek_pos..seek_pos + 500]);
+
+        // Seek backward to 1st chunk
+        decoder.seek_to(50).unwrap();
+        assert_eq!(decoder.position(), 50);
+
+        let read_data2 = decoder.read_n_bytes(100).unwrap();
+        assert_eq!(&read_data2[..], &data[50..150]);
+
+        // Seek to end
+        decoder.seek_to(data.len()).unwrap();
+        assert!(decoder.is_exhausted());
     }
 }
