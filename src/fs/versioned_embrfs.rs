@@ -1787,6 +1787,71 @@ impl VersionedEmbrFS {
         &self.config
     }
 
+    /// Create a streaming decoder for memory-efficient file reading
+    ///
+    /// Returns a `StreamingDecoder` that decodes chunks on-demand, keeping memory
+    /// usage bounded regardless of file size. Use this for large files where loading
+    /// the entire file into memory is impractical.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use embeddenator_fs::VersionedEmbrFS;
+    /// # use std::io::Read;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let fs = VersionedEmbrFS::new();
+    ///
+    /// // Create streaming decoder
+    /// let mut decoder = fs.stream_decode("large_file.bin")?;
+    ///
+    /// // Read in chunks without loading entire file
+    /// let mut buffer = vec![0u8; 4096];
+    /// while let Ok(n) = decoder.read(&mut buffer) {
+    ///     if n == 0 { break; }
+    ///     // Process buffer[..n]
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn stream_decode(
+        &self,
+        path: &str,
+    ) -> Result<crate::streaming::StreamingDecoder<'_>, EmbrFSError> {
+        crate::streaming::StreamingDecoder::new(self, path)
+    }
+
+    /// Create a streaming decoder with custom options
+    ///
+    /// Allows setting starting offset and maximum bytes to read for partial decoding.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// # use embeddenator_fs::VersionedEmbrFS;
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let fs = VersionedEmbrFS::new();
+    ///
+    /// // Read bytes 1000-2000 from a file
+    /// let decoder = fs.stream_decode_range("large_file.bin", 1000, Some(1000))?;
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn stream_decode_range(
+        &self,
+        path: &str,
+        offset: usize,
+        max_bytes: Option<usize>,
+    ) -> Result<crate::streaming::StreamingDecoder<'_>, EmbrFSError> {
+        let mut builder = crate::streaming::StreamingDecoderBuilder::new(self, path);
+        if offset > 0 {
+            builder = builder.with_offset(offset);
+        }
+        if let Some(max) = max_bytes {
+            builder = builder.with_max_bytes(max);
+        }
+        builder.build()
+    }
+
     /// Allocate a new unique chunk ID (public for streaming API)
     pub fn allocate_chunk_id(&self) -> ChunkId {
         self.next_chunk_id.fetch_add(1, Ordering::AcqRel) as ChunkId

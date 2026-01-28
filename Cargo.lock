@@ -550,6 +550,7 @@ version = "0.21.0"
 dependencies = [
  "bincode 1.3.3",
  "embeddenator-vsa",
+ "rayon",
  "serde",
  "sha2",
 ]

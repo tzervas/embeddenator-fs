@@ -375,24 +375,21 @@ impl Filesystem for VersionedFUSE {
             }
         };
 
-        // Read file data
-        let data = match self.fs.read_file(&path) {
-            Ok((data, _version)) => data,
-            Err(_) => {
-                reply.error(libc::EIO);
-                return;
-            }
-        };
-
-        // Return requested slice
+        // Use read_range for memory-efficient partial reads
+        // This avoids loading the entire file when only a portion is needed
         let offset = offset as usize;
         let size = size as usize;
-        let end = (offset + size).min(data.len());
 
-        if offset >= data.len() {
-            reply.data(&[]);
-        } else {
-            reply.data(&data[offset..end]);
+        match self.fs.read_range(&path, offset, size) {
+            Ok((data, _version)) => {
+                reply.data(&data);
+            }
+            Err(EmbrFSError::FileNotFound(_)) => {
+                reply.error(libc::ENOENT);
+            }
+            Err(_) => {
+                reply.error(libc::EIO);
+            }
         }
     }
 

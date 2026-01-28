@@ -1244,4 +1244,115 @@ mod tests {
         let read_data = decoder.read_n_bytes(50).unwrap();
         assert_eq!(&read_data[..], &data[100..150]);
     }
+
+    #[test]
+    fn test_stream_decode_convenience_method() {
+        let fs = VersionedEmbrFS::new();
+        let data = b"Testing stream_decode convenience method";
+
+        fs.write_file("convenience.txt", data, None).unwrap();
+
+        // Use the convenience method
+        let mut decoder = fs.stream_decode("convenience.txt").unwrap();
+
+        assert_eq!(decoder.file_size(), data.len());
+        let read_data = decoder.read_n_bytes(data.len()).unwrap();
+        assert_eq!(&read_data[..], data);
+    }
+
+    #[test]
+    fn test_stream_decode_range_convenience_method() {
+        let fs = VersionedEmbrFS::new();
+        let data: Vec<u8> = (0..1000).map(|i| (i % 256) as u8).collect();
+
+        fs.write_file("range_convenience.bin", &data, None).unwrap();
+
+        // Use the convenience method with offset
+        let mut decoder = fs
+            .stream_decode_range("range_convenience.bin", 500, Some(200))
+            .unwrap();
+
+        assert_eq!(decoder.position(), 500);
+        let read_data = decoder.read_n_bytes(200).unwrap();
+        assert_eq!(&read_data[..], &data[500..700]);
+    }
+
+    #[test]
+    fn test_streaming_decoder_memory_bounded() {
+        // This test verifies that streaming decode maintains bounded memory usage
+        // by processing a file much larger than the internal buffer.
+        //
+        // The key property is that StreamingDecoder only keeps one chunk in memory
+        // at a time (current_chunk_data), regardless of total file size.
+
+        let fs = VersionedEmbrFS::new();
+
+        // Create a file spanning many chunks (e.g., 50 chunks = 200KB with 4KB chunks)
+        // In production, this would be 1GB+, but we test the algorithm with smaller data
+        let num_chunks = 50;
+        let data: Vec<u8> = (0..DEFAULT_CHUNK_SIZE * num_chunks)
+            .map(|i| (i % 256) as u8)
+            .collect();
+
+        fs.write_file("memory_bounded.bin", &data, None).unwrap();
+
+        // Create decoder and verify it only loads one chunk at a time
+        let mut decoder = StreamingDecoder::new(&fs, "memory_bounded.bin").unwrap();
+
+        assert_eq!(decoder.chunk_count(), num_chunks);
+        assert_eq!(decoder.file_size(), data.len());
+
+        // Read chunk by chunk via iterator to verify bounded memory
+        let mut total_read = 0;
+        let mut chunk_count = 0;
+        for chunk_result in &mut decoder {
+            let chunk_data = chunk_result.unwrap();
+            // Each chunk should be at most DEFAULT_CHUNK_SIZE
+            assert!(chunk_data.len() <= DEFAULT_CHUNK_SIZE);
+            total_read += chunk_data.len();
+            chunk_count += 1;
+        }
+
+        assert_eq!(total_read, data.len());
+        assert_eq!(chunk_count, num_chunks);
+
+        // Verify full data matches via fresh decoder with random access
+        let mut decoder2 = StreamingDecoder::new(&fs, "memory_bounded.bin").unwrap();
+        let full_data = decoder2.read_n_bytes(data.len()).unwrap();
+        assert_eq!(full_data, data);
+    }
+
+    #[test]
+    fn test_streaming_decoder_seek_across_chunks() {
+        let fs = VersionedEmbrFS::new();
+
+        // Create multi-chunk file
+        let data: Vec<u8> = (0..DEFAULT_CHUNK_SIZE * 5)
+            .map(|i| (i % 256) as u8)
+            .collect();
+
+        fs.write_file("seek_multi.bin", &data, None).unwrap();
+
+        let mut decoder = StreamingDecoder::new(&fs, "seek_multi.bin").unwrap();
+
+        // Seek to middle of 3rd chunk
+        let seek_pos = DEFAULT_CHUNK_SIZE * 2 + 100;
+        decoder.seek_to(seek_pos).unwrap();
+        assert_eq!(decoder.position(), seek_pos);
+
+        // Read and verify
+        let read_data = decoder.read_n_bytes(500).unwrap();
+        assert_eq!(&read_data[..], &data[seek_pos..seek_pos + 500]);
+
+        // Seek backward to 1st chunk
+        decoder.seek_to(50).unwrap();
+        assert_eq!(decoder.position(), 50);
+
+        let read_data2 = decoder.read_n_bytes(100).unwrap();
+        assert_eq!(&read_data2[..], &data[50..150]);
+
+        // Seek to end
+        decoder.seek_to(data.len()).unwrap();
+        assert!(decoder.is_exhausted());
+    }
 }
