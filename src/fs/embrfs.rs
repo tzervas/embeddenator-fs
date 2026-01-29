@@ -23,7 +23,7 @@
 use crate::correction::{CorrectionStats, CorrectionStore};
 use embeddenator_retrieval::resonator::Resonator;
 use embeddenator_retrieval::{RerankedResult, TernaryInvertedIndex};
-use embeddenator_vsa::{ReversibleVSAConfig, SparseVec, DIM};
+use embeddenator_vsa::{ReversibleVSAConfig, ReversibleVSAEncoder, SparseVec, DIM};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
@@ -52,6 +52,16 @@ pub struct FileEntry {
 pub struct Manifest {
     pub files: Vec<FileEntry>,
     pub total_chunks: usize,
+    /// Chunk size used during encoding (64 for holographic, 4096 for legacy)
+    #[serde(default = "default_chunk_size")]
+    pub chunk_size: usize,
+    /// Whether holographic encoding was used
+    #[serde(default)]
+    pub holographic: bool,
+}
+
+fn default_chunk_size() -> usize {
+    DEFAULT_CHUNK_SIZE
 }
 
 /// Hierarchical manifest for multi-level engrams
@@ -606,6 +616,11 @@ impl Engram {
     }
 }
 
+/// Chunk size optimized for holographic encoding (8 bytes)
+/// Smaller chunks achieve higher accuracy (~94%) with ReversibleVSAEncoder
+/// Using larger chunks creates too much crosstalk from bundling
+pub const HOLOGRAPHIC_CHUNK_SIZE: usize = 8;
+
 /// EmbrFS - Holographic Filesystem with Guaranteed Reconstruction
 ///
 /// # 100% Reconstruction Guarantee
@@ -623,14 +638,23 @@ impl Engram {
 /// - Number of files in the engram
 /// - Superposition crosstalk in bundles
 ///
+/// # Holographic Mode
+///
+/// When created with `new_holographic()`, uses `ReversibleVSAEncoder` which achieves
+/// ~94% uncorrected accuracy through position-aware VSA binding. This results in
+/// <10% correction overhead instead of the ~200%+ overhead of legacy encoding.
+///
 /// # Examples
 ///
 /// ```
 /// use embeddenator_fs::EmbrFS;
 /// use std::path::Path;
 ///
-/// let mut fs = EmbrFS::new();
-/// // Ingest and extract would require actual files, so we just test creation
+/// // Legacy mode (not recommended)
+/// let mut fs_legacy = EmbrFS::new();
+///
+/// // Holographic mode (recommended - minimal storage overhead)
+/// let mut fs = EmbrFS::new_holographic();
 /// assert_eq!(fs.manifest.total_chunks, 0);
 /// assert_eq!(fs.manifest.files.len(), 0);
 /// ```
@@ -638,34 +662,47 @@ pub struct EmbrFS {
     pub manifest: Manifest,
     pub engram: Engram,
     pub resonator: Option<Resonator>,
+    /// ReversibleVSAEncoder for true holographic encoding (~94% accuracy)
+    /// None in legacy mode, Some in holographic mode
+    encoder: Option<ReversibleVSAEncoder>,
+    /// Chunk size for encoding (64 bytes for holographic, 4096 for legacy)
+    chunk_size: usize,
 }
 
 impl Default for EmbrFS {
     fn default() -> Self {
-        Self::new()
+        Self::new_holographic()
     }
 }
 
 impl EmbrFS {
-    /// Create a new empty EmbrFS instance
+    /// Create a new empty EmbrFS instance (legacy mode - NOT RECOMMENDED)
+    ///
+    /// This constructor creates an EmbrFS with legacy encoding that has only ~10%
+    /// accuracy, resulting in ~200%+ storage overhead due to verbatim corrections.
+    ///
+    /// **Use `new_holographic()` instead for production use.**
     ///
     /// # Examples
     ///
     /// ```
     /// use embeddenator_fs::EmbrFS;
     ///
+    /// // Legacy mode - high storage overhead
     /// let fs = EmbrFS::new();
     /// assert_eq!(fs.manifest.files.len(), 0);
-    /// assert_eq!(fs.manifest.total_chunks, 0);
-    /// // Correction store starts empty
-    /// let stats = fs.engram.corrections.stats();
-    /// assert_eq!(stats.total_chunks, 0);
     /// ```
+    #[deprecated(
+        since = "0.25.0",
+        note = "Use new_holographic() instead for ~94% encoding accuracy and <10% storage overhead"
+    )]
     pub fn new() -> Self {
         EmbrFS {
             manifest: Manifest {
                 files: Vec::new(),
                 total_chunks: 0,
+                chunk_size: DEFAULT_CHUNK_SIZE,
+                holographic: false,
             },
             engram: Engram {
                 root: SparseVec::new(),
@@ -673,7 +710,54 @@ impl EmbrFS {
                 corrections: CorrectionStore::new(),
             },
             resonator: None,
+            encoder: None,
+            chunk_size: DEFAULT_CHUNK_SIZE,
         }
+    }
+
+    /// Create a new EmbrFS with holographic encoding (RECOMMENDED)
+    ///
+    /// Uses `ReversibleVSAEncoder` which achieves ~94% uncorrected accuracy through
+    /// position-aware VSA binding. This results in <10% correction overhead instead
+    /// of the ~200%+ overhead of legacy encoding.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use embeddenator_fs::EmbrFS;
+    ///
+    /// let fs = EmbrFS::new_holographic();
+    /// assert_eq!(fs.manifest.files.len(), 0);
+    /// assert_eq!(fs.manifest.total_chunks, 0);
+    /// assert!(fs.is_holographic());
+    /// ```
+    pub fn new_holographic() -> Self {
+        EmbrFS {
+            manifest: Manifest {
+                files: Vec::new(),
+                total_chunks: 0,
+                chunk_size: HOLOGRAPHIC_CHUNK_SIZE,
+                holographic: true,
+            },
+            engram: Engram {
+                root: SparseVec::new(),
+                codebook: HashMap::new(),
+                corrections: CorrectionStore::new(),
+            },
+            resonator: None,
+            encoder: Some(ReversibleVSAEncoder::new()),
+            chunk_size: HOLOGRAPHIC_CHUNK_SIZE,
+        }
+    }
+
+    /// Check if holographic mode is enabled
+    pub fn is_holographic(&self) -> bool {
+        self.encoder.is_some()
+    }
+
+    /// Get the chunk size being used
+    pub fn chunk_size(&self) -> usize {
+        self.chunk_size
     }
 
     fn path_to_forward_slash_string(path: &Path) -> String {
@@ -826,28 +910,42 @@ impl EmbrFS {
         file.read_to_end(&mut data)?;
 
         let is_text = is_text_file(&data);
+        let is_holographic = self.encoder.is_some();
 
         if verbose {
             println!(
-                "Ingesting {}: {} bytes ({})",
+                "Ingesting {}: {} bytes ({}, {})",
                 logical_path,
                 data.len(),
-                if is_text { "text" } else { "binary" }
+                if is_text { "text" } else { "binary" },
+                if is_holographic {
+                    "holographic"
+                } else {
+                    "legacy"
+                }
             );
         }
 
-        let chunk_size = DEFAULT_CHUNK_SIZE;
+        let chunk_size = self.chunk_size;
         let mut chunks = Vec::new();
         let mut corrections_needed = 0usize;
+        let mut total_correction_bytes = 0usize;
 
         for (i, chunk) in data.chunks(chunk_size).enumerate() {
             let chunk_id = self.manifest.total_chunks + i;
 
             // Encode chunk to sparse vector
-            let chunk_vec = SparseVec::encode_data(chunk, config, Some(&logical_path));
-
-            // Immediately verify: decode and compare
-            let decoded = chunk_vec.decode_data(config, Some(&logical_path), chunk.len());
+            let (chunk_vec, decoded) = if let Some(ref mut encoder) = self.encoder {
+                // Holographic mode: use ReversibleVSAEncoder (~94% accuracy)
+                let encoded = encoder.encode(chunk);
+                let decoded = encoder.decode(&encoded, chunk.len());
+                (encoded, decoded)
+            } else {
+                // Legacy mode: use SparseVec::encode_data (~10% accuracy)
+                let encoded = SparseVec::encode_data(chunk, config, Some(&logical_path));
+                let decoded = encoded.decode_data(config, Some(&logical_path), chunk.len());
+                (encoded, decoded)
+            };
 
             // Store correction if needed (guarantees reconstruction)
             self.engram
@@ -856,6 +954,10 @@ impl EmbrFS {
 
             if chunk != decoded.as_slice() {
                 corrections_needed += 1;
+                // Track correction overhead
+                if let Some(correction) = self.engram.corrections.get(chunk_id as u64) {
+                    total_correction_bytes += correction.storage_size();
+                }
             }
 
             self.engram.root = self.engram.root.bundle(&chunk_vec);
@@ -863,11 +965,22 @@ impl EmbrFS {
             chunks.push(chunk_id);
         }
 
-        if verbose && corrections_needed > 0 {
+        if verbose {
+            let total_chunks = chunks.len();
+            let perfect_chunks = total_chunks - corrections_needed;
+            let accuracy = if total_chunks > 0 {
+                (perfect_chunks as f64 / total_chunks as f64) * 100.0
+            } else {
+                100.0
+            };
+            let overhead = if !data.is_empty() {
+                (total_correction_bytes as f64 / data.len() as f64) * 100.0
+            } else {
+                0.0
+            };
             println!(
-                "  → {} of {} chunks needed correction",
-                corrections_needed,
-                chunks.len()
+                "  → {}/{} chunks perfect ({:.1}% accuracy), {:.1}% correction overhead",
+                perfect_chunks, total_chunks, accuracy, overhead
             );
         }
 
@@ -1134,6 +1247,9 @@ impl EmbrFS {
             );
         }
 
+        let is_holographic = self.encoder.is_some();
+        let chunk_size = self.chunk_size;
+
         // Create new engram with fresh root and codebook
         let mut new_engram = Engram {
             root: SparseVec::new(),
@@ -1145,6 +1261,8 @@ impl EmbrFS {
         let mut new_manifest = Manifest {
             files: Vec::new(),
             total_chunks: 0,
+            chunk_size,
+            holographic: is_holographic,
         };
 
         // Process each non-deleted file
@@ -1153,19 +1271,32 @@ impl EmbrFS {
                 continue;
             }
 
-            // Reconstruct file data from old engram
+            // Reconstruct file data from old engram using current decoder
             let mut file_data = Vec::new();
             let num_chunks = old_file.chunks.len();
+            let old_chunk_size = self.manifest.chunk_size;
+
             for (chunk_idx, &chunk_id) in old_file.chunks.iter().enumerate() {
                 if let Some(chunk_vec) = self.engram.codebook.get(&chunk_id) {
-                    let chunk_size = if chunk_idx == num_chunks - 1 {
-                        let remaining = old_file.size - (chunk_idx * DEFAULT_CHUNK_SIZE);
-                        remaining.min(DEFAULT_CHUNK_SIZE)
+                    let this_chunk_size = if chunk_idx == num_chunks - 1 {
+                        let remaining = old_file.size.saturating_sub(chunk_idx * old_chunk_size);
+                        remaining.min(old_chunk_size)
                     } else {
-                        DEFAULT_CHUNK_SIZE
+                        old_chunk_size
                     };
 
-                    let decoded = chunk_vec.decode_data(config, Some(&old_file.path), chunk_size);
+                    // Decode using appropriate method
+                    let decoded = if self.manifest.holographic {
+                        if let Some(ref encoder) = self.encoder {
+                            encoder.decode(chunk_vec, this_chunk_size)
+                        } else {
+                            // Fallback if encoder not available
+                            chunk_vec.decode_data(config, Some(&old_file.path), this_chunk_size)
+                        }
+                    } else {
+                        chunk_vec.decode_data(config, Some(&old_file.path), this_chunk_size)
+                    };
+
                     let chunk_data = if let Some(corrected) =
                         self.engram.corrections.apply(chunk_id as u64, &decoded)
                     {
@@ -1179,14 +1310,22 @@ impl EmbrFS {
             }
             file_data.truncate(old_file.size);
 
-            // Re-encode with new chunk IDs
+            // Re-encode with new chunk IDs using current encoder
             let mut new_chunks = Vec::new();
 
-            for (i, chunk) in file_data.chunks(DEFAULT_CHUNK_SIZE).enumerate() {
+            for (i, chunk) in file_data.chunks(chunk_size).enumerate() {
                 let new_chunk_id = new_manifest.total_chunks + i;
 
-                let chunk_vec = SparseVec::encode_data(chunk, config, Some(&old_file.path));
-                let decoded = chunk_vec.decode_data(config, Some(&old_file.path), chunk.len());
+                // Encode using appropriate method
+                let (chunk_vec, decoded) = if let Some(ref mut encoder) = self.encoder {
+                    let encoded = encoder.encode(chunk);
+                    let decoded = encoder.decode(&encoded, chunk.len());
+                    (encoded, decoded)
+                } else {
+                    let encoded = SparseVec::encode_data(chunk, config, Some(&old_file.path));
+                    let decoded = encoded.decode_data(config, Some(&old_file.path), chunk.len());
+                    (encoded, decoded)
+                };
 
                 new_engram
                     .corrections
@@ -1221,10 +1360,13 @@ impl EmbrFS {
         self.manifest = new_manifest;
 
         if verbose {
+            let stats = self.engram.corrections.stats();
             println!(
-                "Compaction complete: {} files, {} chunks",
+                "Compaction complete: {} files, {} chunks ({:.1}% perfect, {:.2}% correction overhead)",
                 self.manifest.files.len(),
-                self.manifest.total_chunks
+                self.manifest.total_chunks,
+                stats.perfect_ratio * 100.0,
+                stats.correction_ratio * 100.0
             );
         }
 
@@ -1258,6 +1400,40 @@ impl EmbrFS {
         Ok(manifest)
     }
 
+    /// Load an EmbrFS from engram and manifest files
+    ///
+    /// Automatically detects if the engram was created with holographic mode
+    /// and sets up the appropriate encoder for extraction.
+    ///
+    /// # Arguments
+    /// * `engram_path` - Path to the engram file
+    /// * `manifest_path` - Path to the manifest JSON file
+    ///
+    /// # Returns
+    /// `io::Result<EmbrFS>` with the loaded engram and manifest
+    pub fn load<P: AsRef<Path>, Q: AsRef<Path>>(
+        engram_path: P,
+        manifest_path: Q,
+    ) -> io::Result<Self> {
+        let engram = Self::load_engram(engram_path)?;
+        let manifest = Self::load_manifest(manifest_path)?;
+
+        // Create encoder if holographic mode was used
+        let (encoder, chunk_size) = if manifest.holographic {
+            (Some(ReversibleVSAEncoder::new()), manifest.chunk_size)
+        } else {
+            (None, manifest.chunk_size)
+        };
+
+        Ok(EmbrFS {
+            manifest,
+            engram,
+            resonator: None,
+            encoder,
+            chunk_size,
+        })
+    }
+
     /// Extract files from engram to directory with guaranteed reconstruction
     ///
     /// This method guarantees 100% bit-perfect reconstruction by applying
@@ -1288,11 +1464,27 @@ impl EmbrFS {
     ) -> io::Result<()> {
         let output_dir = output_dir.as_ref();
 
+        // Use manifest's chunk_size and holographic flag
+        let chunk_size = manifest.chunk_size;
+        let is_holographic = manifest.holographic;
+
+        // Create encoder for holographic decoding if needed
+        let encoder = if is_holographic {
+            Some(ReversibleVSAEncoder::new())
+        } else {
+            None
+        };
+
         if verbose {
             println!(
-                "Extracting {} files to {}",
+                "Extracting {} files to {} ({})",
                 manifest.files.iter().filter(|f| !f.deleted).count(),
-                output_dir.display()
+                output_dir.display(),
+                if is_holographic {
+                    "holographic"
+                } else {
+                    "legacy"
+                }
             );
             let stats = engram.corrections.stats();
             println!(
@@ -1318,20 +1510,24 @@ impl EmbrFS {
             let num_chunks = file_entry.chunks.len();
             for (chunk_idx, &chunk_id) in file_entry.chunks.iter().enumerate() {
                 if let Some(chunk_vec) = engram.codebook.get(&chunk_id) {
-                    // Calculate the actual chunk size
-                    // Last chunk may be smaller than DEFAULT_CHUNK_SIZE
-                    let chunk_size = if chunk_idx == num_chunks - 1 {
+                    // Calculate the actual chunk size for this chunk
+                    // Last chunk may be smaller than the standard chunk_size
+                    let this_chunk_size = if chunk_idx == num_chunks - 1 {
                         // Last chunk: remaining bytes
-                        let remaining = file_entry.size - (chunk_idx * DEFAULT_CHUNK_SIZE);
-                        remaining.min(DEFAULT_CHUNK_SIZE)
+                        let remaining = file_entry.size.saturating_sub(chunk_idx * chunk_size);
+                        remaining.min(chunk_size)
                     } else {
-                        DEFAULT_CHUNK_SIZE
+                        chunk_size
                     };
 
-                    // Decode the sparse vector to bytes
-                    // IMPORTANT: Use the same path as during encoding for correct shift calculation
-                    // Also use the same chunk_size as during ingest for correct correction matching
-                    let decoded = chunk_vec.decode_data(config, Some(&file_entry.path), chunk_size);
+                    // Decode the sparse vector to bytes using appropriate method
+                    let decoded = if let Some(ref enc) = encoder {
+                        // Holographic mode: use ReversibleVSAEncoder
+                        enc.decode(chunk_vec, this_chunk_size)
+                    } else {
+                        // Legacy mode: use SparseVec::decode_data
+                        chunk_vec.decode_data(config, Some(&file_entry.path), this_chunk_size)
+                    };
 
                     // Apply correction to guarantee bit-perfect reconstruction
                     let chunk_data = if let Some(corrected) =

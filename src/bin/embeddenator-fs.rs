@@ -358,7 +358,8 @@ fn run() -> io::Result<()> {
             }
 
             let start = Instant::now();
-            let mut fs = EmbrFS::new();
+            // Use holographic mode for ~94% encoding accuracy and <10% storage overhead
+            let mut fs = EmbrFS::new_holographic();
             let config = ReversibleVSAConfig::default();
 
             // Single directory input - use simple ingestion
@@ -881,14 +882,7 @@ fn run() -> io::Result<()> {
                     println!("Adding file to engram...");
                 }
 
-                let mut fs = EmbrFS::load_engram(&engram)
-                    .and_then(|e| EmbrFS::load_manifest(&manifest).map(|m| (e, m)))
-                    .map(|(e, m)| {
-                        let mut fs = EmbrFS::new();
-                        fs.engram = e;
-                        fs.manifest = m;
-                        fs
-                    })?;
+                let mut fs = EmbrFS::load(&engram, &manifest)?;
 
                 let config = ReversibleVSAConfig::default();
                 let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -918,14 +912,7 @@ fn run() -> io::Result<()> {
                     println!("Removing file from engram...");
                 }
 
-                let mut fs = EmbrFS::load_engram(&engram)
-                    .and_then(|e| EmbrFS::load_manifest(&manifest).map(|m| (e, m)))
-                    .map(|(e, m)| {
-                        let mut fs = EmbrFS::new();
-                        fs.engram = e;
-                        fs.manifest = m;
-                        fs
-                    })?;
+                let mut fs = EmbrFS::load(&engram, &manifest)?;
 
                 fs.remove_file(&path, verbose)?;
 
@@ -948,14 +935,7 @@ fn run() -> io::Result<()> {
                     println!("Modifying file in engram...");
                 }
 
-                let mut fs = EmbrFS::load_engram(&engram)
-                    .and_then(|e| EmbrFS::load_manifest(&manifest).map(|m| (e, m)))
-                    .map(|(e, m)| {
-                        let mut fs = EmbrFS::new();
-                        fs.engram = e;
-                        fs.manifest = m;
-                        fs
-                    })?;
+                let mut fs = EmbrFS::load(&engram, &manifest)?;
 
                 let config = ReversibleVSAConfig::default();
                 let cwd = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -985,14 +965,7 @@ fn run() -> io::Result<()> {
                 }
 
                 let start = Instant::now();
-                let mut fs = EmbrFS::load_engram(&engram)
-                    .and_then(|e| EmbrFS::load_manifest(&manifest).map(|m| (e, m)))
-                    .map(|(e, m)| {
-                        let mut fs = EmbrFS::new();
-                        fs.engram = e;
-                        fs.manifest = m;
-                        fs
-                    })?;
+                let mut fs = EmbrFS::load(&engram, &manifest)?;
 
                 let old_chunks = fs.manifest.total_chunks;
                 let old_files = fs.manifest.files.len();

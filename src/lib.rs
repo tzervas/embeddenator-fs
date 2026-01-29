@@ -57,7 +57,7 @@ pub mod disk;
 
 // Re-export common types from vsa and retrieval for convenience
 pub use embeddenator_retrieval::resonator::Resonator;
-pub use embeddenator_vsa::{ReversibleVSAConfig, SparseVec};
+pub use embeddenator_vsa::{ReversibleVSAConfig, ReversibleVSAEncoder, SparseVec};
 
 #[cfg(test)]
 mod tests {
