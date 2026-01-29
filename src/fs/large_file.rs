@@ -43,7 +43,9 @@
 
 use crate::correction::ChunkCorrection;
 use crate::versioned::{ChunkId, VersionedChunk, VersionedFileEntry};
-use crate::versioned_embrfs::{EmbrFSError, VersionedEmbrFS, DEFAULT_CHUNK_SIZE};
+use crate::versioned_embrfs::{
+    EmbrFSError, VersionedEmbrFS, DEFAULT_CHUNK_SIZE, ENCODING_FORMAT_REVERSIBLE_VSA,
+};
 use embeddenator_vsa::SparseVec;
 use sha2::{Digest, Sha256};
 
@@ -211,11 +213,13 @@ impl<'a> LargeFileHandler<'a> {
         for chunk_data in chunks {
             let chunk_id = self.fs.allocate_chunk_id();
 
-            // Encode
-            let chunk_vec = SparseVec::encode_data(chunk_data, self.fs.config(), Some(path));
+            // Encode (using mode-appropriate encoder)
+            let chunk_vec = self.fs.encode_chunk(chunk_data, Some(path));
 
-            // Verify
-            let decoded = chunk_vec.decode_data(self.fs.config(), Some(path), chunk_data.len());
+            // Verify (using mode-appropriate decoder)
+            let decoded = self
+                .fs
+                .decode_chunk(&chunk_vec, Some(path), chunk_data.len());
 
             // Compute hash
             let mut hasher = Sha256::new();
@@ -243,8 +247,13 @@ impl<'a> LargeFileHandler<'a> {
         // Create manifest entry
         let total_size: usize = chunks.iter().map(|c| c.len()).sum();
         let is_text = is_text_data_sample(chunks.first().copied().unwrap_or(&[]));
-        let file_entry =
+        let mut file_entry =
             VersionedFileEntry::new(path.to_string(), is_text, total_size, chunk_ids.clone());
+
+        // Set encoding format for holographic mode files
+        if self.fs.is_holographic() {
+            file_entry.encoding_format = Some(ENCODING_FORMAT_REVERSIBLE_VSA);
+        }
 
         let version = if let Some(expected) = expected_version {
             let existing = self
@@ -299,11 +308,13 @@ impl<'a> LargeFileHandler<'a> {
         for chunk_data in chunks {
             let chunk_id = self.fs.allocate_chunk_id();
 
-            // Encode
-            let chunk_vec = SparseVec::encode_data(chunk_data, self.fs.config(), Some(path));
+            // Encode (using mode-appropriate encoder)
+            let chunk_vec = self.fs.encode_chunk(chunk_data, Some(path));
 
-            // Verify
-            let decoded = chunk_vec.decode_data(self.fs.config(), Some(path), chunk_data.len());
+            // Verify (using mode-appropriate decoder)
+            let decoded = self
+                .fs
+                .decode_chunk(&chunk_vec, Some(path), chunk_data.len());
 
             // Compute hash
             let mut hasher = Sha256::new();
@@ -355,8 +366,13 @@ impl<'a> LargeFileHandler<'a> {
         // Create manifest entry
         let total_size: usize = chunks.iter().map(|c| c.len()).sum();
         let is_text = is_text_data_sample(chunks.first().copied().unwrap_or(&[]));
-        let file_entry =
+        let mut file_entry =
             VersionedFileEntry::new(path.to_string(), is_text, total_size, chunk_ids.clone());
+
+        // Set encoding format for holographic mode files
+        if self.fs.is_holographic() {
+            file_entry.encoding_format = Some(ENCODING_FORMAT_REVERSIBLE_VSA);
+        }
 
         let version = if let Some(expected) = expected_version {
             let existing = self

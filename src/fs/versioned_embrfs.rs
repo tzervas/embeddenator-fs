@@ -651,6 +651,76 @@ impl VersionedEmbrFS {
         }
     }
 
+    /// Encode chunk data using appropriate encoder based on mode.
+    ///
+    /// When holographic mode is enabled, uses ReversibleVSAEncoder for ~94% uncorrected accuracy.
+    /// Otherwise uses legacy SparseVec::encode_data().
+    pub fn encode_chunk(&self, data: &[u8], path: Option<&str>) -> SparseVec {
+        if self.holographic_mode {
+            self.reversible_encoder.write().unwrap().encode(data)
+        } else {
+            SparseVec::encode_data(data, &self.config, path)
+        }
+    }
+
+    /// Decode chunk data using appropriate decoder based on mode.
+    ///
+    /// Must match the encoding method: use ReversibleVSAEncoder::decode for holographic mode,
+    /// SparseVec::decode_data for legacy mode.
+    pub fn decode_chunk(
+        &self,
+        vec: &SparseVec,
+        path: Option<&str>,
+        original_size: usize,
+    ) -> Vec<u8> {
+        if self.holographic_mode {
+            self.reversible_encoder
+                .read()
+                .unwrap()
+                .decode(vec, original_size)
+        } else {
+            vec.decode_data(&self.config, path, original_size)
+        }
+    }
+
+    /// Encode chunk data using an explicit encoding format.
+    ///
+    /// Use this when encoding chunks for existing files that have a specific encoding_format
+    /// stored in their manifest entry, to preserve consistency.
+    pub fn encode_chunk_with_format(
+        &self,
+        data: &[u8],
+        path: Option<&str>,
+        encoding_format: Option<u8>,
+    ) -> SparseVec {
+        if encoding_format == Some(ENCODING_FORMAT_REVERSIBLE_VSA) {
+            self.reversible_encoder.write().unwrap().encode(data)
+        } else {
+            SparseVec::encode_data(data, &self.config, path)
+        }
+    }
+
+    /// Decode chunk data using an explicit encoding format.
+    ///
+    /// Use this when decoding chunks for existing files that have a specific encoding_format
+    /// stored in their manifest entry, to ensure correct decoding.
+    pub fn decode_chunk_with_format(
+        &self,
+        vec: &SparseVec,
+        path: Option<&str>,
+        original_size: usize,
+        encoding_format: Option<u8>,
+    ) -> Vec<u8> {
+        if encoding_format == Some(ENCODING_FORMAT_REVERSIBLE_VSA) {
+            self.reversible_encoder
+                .read()
+                .unwrap()
+                .decode(vec, original_size)
+        } else {
+            vec.decode_data(&self.config, path, original_size)
+        }
+    }
+
     /// Apply a single byte replacement
     fn apply_byte_replace(
         &self,
@@ -694,11 +764,11 @@ impl VersionedEmbrFS {
             modified[offset_in_chunk] = new_value;
         }
 
-        // 3. Re-encode the modified chunk
-        let new_vec = SparseVec::encode_data(&modified, &self.config, Some(path));
+        // 3. Re-encode the modified chunk (using mode-appropriate encoder)
+        let new_vec = self.encode_chunk(&modified, Some(path));
 
-        // 4. Compute new correction
-        let decoded_new = new_vec.decode_data(&self.config, Some(path), modified.len());
+        // 4. Compute new correction (using mode-appropriate decoder)
+        let decoded_new = self.decode_chunk(&new_vec, Some(path), modified.len());
         let correction =
             crate::correction::ChunkCorrection::new(chunk_id as u64, &modified, &decoded_new);
 
@@ -786,9 +856,9 @@ impl VersionedEmbrFS {
                 }
             }
 
-            // 3. Re-encode and update
-            let new_vec = SparseVec::encode_data(&modified, &self.config, Some(path));
-            let decoded_new = new_vec.decode_data(&self.config, Some(path), modified.len());
+            // 3. Re-encode and update (using mode-appropriate encoder)
+            let new_vec = self.encode_chunk(&modified, Some(path));
+            let decoded_new = self.decode_chunk(&new_vec, Some(path), modified.len());
             let correction =
                 crate::correction::ChunkCorrection::new(chunk_id as u64, &modified, &decoded_new);
 
@@ -929,9 +999,9 @@ impl VersionedEmbrFS {
             // Append data to last chunk
             corrected.extend_from_slice(&remaining_data[..fill_amount]);
 
-            // Re-encode
-            let new_vec = SparseVec::encode_data(&corrected, &self.config, Some(path));
-            let decoded_new = new_vec.decode_data(&self.config, Some(path), corrected.len());
+            // Re-encode (using mode-appropriate encoder)
+            let new_vec = self.encode_chunk(&corrected, Some(path));
+            let decoded_new = self.decode_chunk(&new_vec, Some(path), corrected.len());
             let correction = crate::correction::ChunkCorrection::new(
                 last_chunk_id as u64,
                 &corrected,
@@ -964,8 +1034,9 @@ impl VersionedEmbrFS {
         for chunk_data in remaining_data.chunks(chunk_size) {
             let chunk_id = self.allocate_chunk_id();
 
-            let chunk_vec = SparseVec::encode_data(chunk_data, &self.config, Some(path));
-            let decoded = chunk_vec.decode_data(&self.config, Some(path), chunk_data.len());
+            // Use mode-appropriate encoder
+            let chunk_vec = self.encode_chunk(chunk_data, Some(path));
+            let decoded = self.decode_chunk(&chunk_vec, Some(path), chunk_data.len());
             let correction =
                 crate::correction::ChunkCorrection::new(chunk_id as u64, chunk_data, &decoded);
 
@@ -1063,9 +1134,9 @@ impl VersionedEmbrFS {
                 // Truncate the chunk data
                 let truncated: Vec<u8> = corrected.into_iter().take(last_chunk_bytes).collect();
 
-                // Re-encode
-                let new_vec = SparseVec::encode_data(&truncated, &self.config, Some(path));
-                let decoded_new = new_vec.decode_data(&self.config, Some(path), truncated.len());
+                // Re-encode (using mode-appropriate encoder)
+                let new_vec = self.encode_chunk(&truncated, Some(path));
+                let decoded_new = self.decode_chunk(&new_vec, Some(path), truncated.len());
                 let correction = crate::correction::ChunkCorrection::new(
                     last_chunk_id as u64,
                     &truncated,
@@ -1190,24 +1261,9 @@ impl VersionedEmbrFS {
         for chunk_data in chunks {
             let chunk_id = self.allocate_chunk_id();
 
-            // Encode chunk using appropriate encoder based on mode
-            let chunk_vec = if self.holographic_mode {
-                // Use ReversibleVSAEncoder for ~94% uncorrected accuracy
-                self.reversible_encoder.write().unwrap().encode(chunk_data)
-            } else {
-                // Legacy mode: use SparseVec::encode_data
-                SparseVec::encode_data(chunk_data, &self.config, Some(path))
-            };
-
-            // Immediately verify using matching decoder
-            let decoded = if self.holographic_mode {
-                self.reversible_encoder
-                    .read()
-                    .unwrap()
-                    .decode(&chunk_vec, chunk_data.len())
-            } else {
-                chunk_vec.decode_data(&self.config, Some(path), chunk_data.len())
-            };
+            // Encode and verify using helper methods
+            let chunk_vec = self.encode_chunk(chunk_data, Some(path));
+            let decoded = self.decode_chunk(&chunk_vec, Some(path), chunk_data.len());
 
             // Compute content hash
             let mut hasher = Sha256::new();
@@ -1365,24 +1421,9 @@ impl VersionedEmbrFS {
         for chunk_data in chunks {
             let chunk_id = self.allocate_chunk_id();
 
-            // Encode chunk using appropriate encoder based on mode
-            let chunk_vec = if self.holographic_mode {
-                // Use ReversibleVSAEncoder for ~94% uncorrected accuracy
-                self.reversible_encoder.write().unwrap().encode(chunk_data)
-            } else {
-                // Legacy mode: use SparseVec::encode_data
-                SparseVec::encode_data(chunk_data, &self.config, Some(path))
-            };
-
-            // Immediately verify using matching decoder
-            let decoded = if self.holographic_mode {
-                self.reversible_encoder
-                    .read()
-                    .unwrap()
-                    .decode(&chunk_vec, chunk_data.len())
-            } else {
-                chunk_vec.decode_data(&self.config, Some(path), chunk_data.len())
-            };
+            // Encode and verify using helper methods
+            let chunk_vec = self.encode_chunk(chunk_data, Some(path));
+            let decoded = self.decode_chunk(&chunk_vec, Some(path), chunk_data.len());
 
             // Compute content hash
             let mut hasher = Sha256::new();
