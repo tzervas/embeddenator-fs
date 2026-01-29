@@ -223,7 +223,7 @@ impl VersionedChunkStore {
 
     /// Iterate over all chunks (snapshot)
     ///
-    /// Returns a snapshot of (ChunkId, Arc<VersionedChunk>) pairs.
+    /// Returns a snapshot of (ChunkId, `Arc<VersionedChunk>`) pairs.
     /// Safe to iterate without holding locks.
     pub fn iter(&self) -> Vec<(ChunkId, Arc<VersionedChunk>)> {
         self.chunks
