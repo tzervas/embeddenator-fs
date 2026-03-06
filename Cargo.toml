@@ -76,6 +76,9 @@ tokio-uring = { version = "0.5", optional = true }
 #   - Enables graceful shutdown with WAL flush and clean unmount
 signal-hook = "0.3"
 
+# Parallel processing for chunk encoding/decoding
+rayon = ">=1.8, <2.0"
+
 # Core embeddenator dependencies (path for dev, semver for publish)
 # Note: Version constraints relaxed for CI compatibility with GitHub remotes
 embeddenator-vsa = { path = "../embeddenator-vsa", version = ">=0.20.0, <1.0.0" }

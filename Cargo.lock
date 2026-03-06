@@ -522,6 +522,7 @@ dependencies = [
  "positioned-io2",
  "proptest",
  "qcow2-rs",
+ "rayon",
  "rustc-hash",
  "serde",
  "serde_json",

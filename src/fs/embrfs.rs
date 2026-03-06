@@ -24,6 +24,7 @@ use crate::correction::{CorrectionStats, CorrectionStore};
 use embeddenator_retrieval::resonator::Resonator;
 use embeddenator_retrieval::{RerankedResult, TernaryInvertedIndex};
 use embeddenator_vsa::{ReversibleVSAConfig, ReversibleVSAEncoder, SparseVec, DIM};
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::collections::{HashMap, HashSet};
@@ -927,72 +928,165 @@ impl EmbrFS {
         }
 
         let chunk_size = self.chunk_size;
-        let mut chunks = Vec::new();
-        let mut corrections_needed = 0usize;
-        let mut total_correction_bytes = 0usize;
+        let base_chunk_id = self.manifest.total_chunks;
 
-        for (i, chunk) in data.chunks(chunk_size).enumerate() {
-            let chunk_id = self.manifest.total_chunks + i;
+        // Parallel encoding path for holographic mode
+        if let Some(ref mut encoder) = self.encoder {
+            // Ensure position vectors exist for chunk encoding (local positions 0..chunk_size)
+            encoder.ensure_positions(chunk_size.saturating_sub(1));
 
-            // Encode chunk to sparse vector
-            let (chunk_vec, decoded) = if let Some(ref mut encoder) = self.encoder {
-                // Holographic mode: use ReversibleVSAEncoder (~94% accuracy)
-                let encoded = encoder.encode(chunk);
-                let decoded = encoder.decode(&encoded, chunk.len());
-                (encoded, decoded)
-            } else {
-                // Legacy mode: use SparseVec::encode_data (~10% accuracy)
-                let encoded = SparseVec::encode_data(chunk, config, Some(&logical_path));
-                let decoded = encoded.decode_data(config, Some(&logical_path), chunk.len());
-                (encoded, decoded)
-            };
+            // Get shared references for parallel encoding
+            let byte_vectors = encoder.get_byte_vectors();
+            let position_vectors_len = chunk_size; // Use first chunk_size position vectors
 
-            // Store correction if needed (guarantees reconstruction)
-            self.engram
-                .corrections
-                .add(chunk_id as u64, chunk, &decoded);
+            // Collect chunks for parallel processing
+            let chunk_data: Vec<&[u8]> = data.chunks(chunk_size).collect();
+            let num_chunks = chunk_data.len();
 
-            if chunk != decoded.as_slice() {
-                corrections_needed += 1;
-                // Track correction overhead
-                if let Some(correction) = self.engram.corrections.get(chunk_id as u64) {
-                    total_correction_bytes += correction.storage_size();
+            // Parallel encode each chunk with LOCAL positions (0 to chunk.len()-1)
+            // This matches the sequential encode() behavior
+            let encoded_chunks: Vec<SparseVec> = chunk_data
+                .par_iter()
+                .map(|chunk| {
+                    if chunk.is_empty() {
+                        return SparseVec::new();
+                    }
+                    // Encode with local positions (offset=0 for each chunk)
+                    let byte_vec = &byte_vectors[chunk[0] as usize];
+                    let pos_vec = encoder.get_position_vector_ref(0);
+                    let mut result = byte_vec.bind(pos_vec);
+
+                    for (i, &byte) in chunk.iter().enumerate().skip(1) {
+                        let byte_vec = &byte_vectors[byte as usize];
+                        let pos_vec = encoder.get_position_vector_ref(i % position_vectors_len);
+                        let encoded_byte = byte_vec.bind(pos_vec);
+                        result = result.bundle(&encoded_byte);
+                    }
+                    result
+                })
+                .collect();
+
+            // Parallel decode and compute corrections
+            let corrections_info: Vec<(usize, SparseVec, Vec<u8>, bool)> = encoded_chunks
+                .into_par_iter()
+                .enumerate()
+                .map(|(i, chunk_vec)| {
+                    let chunk = chunk_data[i];
+                    let decoded = encoder.decode(&chunk_vec, chunk.len());
+                    let needs_correction = chunk != decoded.as_slice();
+                    (i, chunk_vec, decoded, needs_correction)
+                })
+                .collect();
+
+            // Sequential phase: add to engram (must be sequential for root bundling)
+            let mut corrections_needed = 0usize;
+            let mut total_correction_bytes = 0usize;
+            let mut chunks = Vec::with_capacity(num_chunks);
+
+            for (i, chunk_vec, decoded, needs_correction) in corrections_info {
+                let chunk_id = base_chunk_id + i;
+                let original_chunk = chunk_data[i];
+
+                // Store correction if needed
+                self.engram
+                    .corrections
+                    .add(chunk_id as u64, original_chunk, &decoded);
+
+                if needs_correction {
+                    corrections_needed += 1;
+                    if let Some(correction) = self.engram.corrections.get(chunk_id as u64) {
+                        total_correction_bytes += correction.storage_size();
+                    }
                 }
+
+                self.engram.root = self.engram.root.bundle(&chunk_vec);
+                self.engram.codebook.insert(chunk_id, chunk_vec);
+                chunks.push(chunk_id);
             }
 
-            self.engram.root = self.engram.root.bundle(&chunk_vec);
-            self.engram.codebook.insert(chunk_id, chunk_vec);
-            chunks.push(chunk_id);
+            if verbose {
+                let perfect_chunks = num_chunks - corrections_needed;
+                let accuracy = if num_chunks > 0 {
+                    (perfect_chunks as f64 / num_chunks as f64) * 100.0
+                } else {
+                    100.0
+                };
+                let overhead = if !data.is_empty() {
+                    (total_correction_bytes as f64 / data.len() as f64) * 100.0
+                } else {
+                    0.0
+                };
+                println!(
+                    "  → {}/{} chunks perfect ({:.1}% accuracy), {:.1}% correction overhead",
+                    perfect_chunks, num_chunks, accuracy, overhead
+                );
+            }
+
+            self.manifest.files.push(FileEntry {
+                path: logical_path,
+                is_text,
+                size: data.len(),
+                chunks: chunks.clone(),
+                deleted: false,
+            });
+
+            self.manifest.total_chunks += chunks.len();
+        } else {
+            // Legacy mode: sequential encoding (no parallelization benefit)
+            let mut chunks = Vec::new();
+            let mut corrections_needed = 0usize;
+            let mut total_correction_bytes = 0usize;
+
+            for (i, chunk) in data.chunks(chunk_size).enumerate() {
+                let chunk_id = base_chunk_id + i;
+                let encoded = SparseVec::encode_data(chunk, config, Some(&logical_path));
+                let decoded = encoded.decode_data(config, Some(&logical_path), chunk.len());
+
+                self.engram
+                    .corrections
+                    .add(chunk_id as u64, chunk, &decoded);
+
+                if chunk != decoded.as_slice() {
+                    corrections_needed += 1;
+                    if let Some(correction) = self.engram.corrections.get(chunk_id as u64) {
+                        total_correction_bytes += correction.storage_size();
+                    }
+                }
+
+                self.engram.root = self.engram.root.bundle(&encoded);
+                self.engram.codebook.insert(chunk_id, encoded);
+                chunks.push(chunk_id);
+            }
+
+            if verbose {
+                let total_chunks = chunks.len();
+                let perfect_chunks = total_chunks - corrections_needed;
+                let accuracy = if total_chunks > 0 {
+                    (perfect_chunks as f64 / total_chunks as f64) * 100.0
+                } else {
+                    100.0
+                };
+                let overhead = if !data.is_empty() {
+                    (total_correction_bytes as f64 / data.len() as f64) * 100.0
+                } else {
+                    0.0
+                };
+                println!(
+                    "  → {}/{} chunks perfect ({:.1}% accuracy), {:.1}% correction overhead",
+                    perfect_chunks, total_chunks, accuracy, overhead
+                );
+            }
+
+            self.manifest.files.push(FileEntry {
+                path: logical_path,
+                is_text,
+                size: data.len(),
+                chunks: chunks.clone(),
+                deleted: false,
+            });
+
+            self.manifest.total_chunks += chunks.len();
         }
-
-        if verbose {
-            let total_chunks = chunks.len();
-            let perfect_chunks = total_chunks - corrections_needed;
-            let accuracy = if total_chunks > 0 {
-                (perfect_chunks as f64 / total_chunks as f64) * 100.0
-            } else {
-                100.0
-            };
-            let overhead = if !data.is_empty() {
-                (total_correction_bytes as f64 / data.len() as f64) * 100.0
-            } else {
-                0.0
-            };
-            println!(
-                "  → {}/{} chunks perfect ({:.1}% accuracy), {:.1}% correction overhead",
-                perfect_chunks, total_chunks, accuracy, overhead
-            );
-        }
-
-        self.manifest.files.push(FileEntry {
-            path: logical_path,
-            is_text,
-            size: data.len(),
-            chunks: chunks.clone(),
-            deleted: false,
-        });
-
-        self.manifest.total_chunks += chunks.len();
 
         Ok(())
     }
@@ -1271,88 +1365,194 @@ impl EmbrFS {
                 continue;
             }
 
-            // Reconstruct file data from old engram using current decoder
-            let mut file_data = Vec::new();
+            // Reconstruct file data from old engram
             let num_chunks = old_file.chunks.len();
             let old_chunk_size = self.manifest.chunk_size;
 
-            for (chunk_idx, &chunk_id) in old_file.chunks.iter().enumerate() {
-                if let Some(chunk_vec) = self.engram.codebook.get(&chunk_id) {
-                    let this_chunk_size = if chunk_idx == num_chunks - 1 {
-                        let remaining = old_file.size.saturating_sub(chunk_idx * old_chunk_size);
-                        remaining.min(old_chunk_size)
-                    } else {
-                        old_chunk_size
-                    };
+            // Parallel decode for holographic mode
+            let file_data = if self.manifest.holographic {
+                if let Some(ref encoder) = self.encoder {
+                    // Collect chunk vectors for batch processing
+                    let chunk_info: Vec<(usize, usize, &SparseVec)> = old_file
+                        .chunks
+                        .iter()
+                        .enumerate()
+                        .filter_map(|(chunk_idx, &chunk_id)| {
+                            self.engram.codebook.get(&chunk_id).map(|chunk_vec| {
+                                let this_chunk_size = if chunk_idx == num_chunks - 1 {
+                                    old_file
+                                        .size
+                                        .saturating_sub(chunk_idx * old_chunk_size)
+                                        .min(old_chunk_size)
+                                } else {
+                                    old_chunk_size
+                                };
+                                (chunk_idx, this_chunk_size, chunk_vec)
+                            })
+                        })
+                        .collect();
 
-                    // Decode using appropriate method
-                    let decoded = if self.manifest.holographic {
-                        if let Some(ref encoder) = self.encoder {
-                            encoder.decode(chunk_vec, this_chunk_size)
-                        } else {
-                            // Fallback if encoder not available
-                            chunk_vec.decode_data(config, Some(&old_file.path), this_chunk_size)
-                        }
-                    } else {
-                        chunk_vec.decode_data(config, Some(&old_file.path), this_chunk_size)
-                    };
+                    // Parallel decode and apply corrections
+                    let decoded_chunks: Vec<Vec<u8>> = chunk_info
+                        .par_iter()
+                        .map(|(chunk_idx, this_chunk_size, chunk_vec)| {
+                            let chunk_id = old_file.chunks[*chunk_idx];
+                            let decoded = encoder.decode(chunk_vec, *this_chunk_size);
+                            if let Some(corrected) =
+                                self.engram.corrections.apply(chunk_id as u64, &decoded)
+                            {
+                                corrected
+                            } else {
+                                decoded
+                            }
+                        })
+                        .collect();
 
-                    let chunk_data = if let Some(corrected) =
-                        self.engram.corrections.apply(chunk_id as u64, &decoded)
-                    {
-                        corrected
-                    } else {
-                        decoded
-                    };
-
-                    file_data.extend_from_slice(&chunk_data);
-                }
-            }
-            file_data.truncate(old_file.size);
-
-            // Re-encode with new chunk IDs using current encoder
-            let mut new_chunks = Vec::new();
-
-            for (i, chunk) in file_data.chunks(chunk_size).enumerate() {
-                let new_chunk_id = new_manifest.total_chunks + i;
-
-                // Encode using appropriate method
-                let (chunk_vec, decoded) = if let Some(ref mut encoder) = self.encoder {
-                    let encoded = encoder.encode(chunk);
-                    let decoded = encoder.decode(&encoded, chunk.len());
-                    (encoded, decoded)
+                    let mut result: Vec<u8> = decoded_chunks.into_iter().flatten().collect();
+                    result.truncate(old_file.size);
+                    result
                 } else {
+                    // Fallback: sequential decode
+                    let mut result = Vec::new();
+                    for (chunk_idx, &chunk_id) in old_file.chunks.iter().enumerate() {
+                        if let Some(chunk_vec) = self.engram.codebook.get(&chunk_id) {
+                            let this_chunk_size = if chunk_idx == num_chunks - 1 {
+                                old_file
+                                    .size
+                                    .saturating_sub(chunk_idx * old_chunk_size)
+                                    .min(old_chunk_size)
+                            } else {
+                                old_chunk_size
+                            };
+                            let decoded = chunk_vec.decode_data(
+                                config,
+                                Some(&old_file.path),
+                                this_chunk_size,
+                            );
+                            let chunk_data = if let Some(corrected) =
+                                self.engram.corrections.apply(chunk_id as u64, &decoded)
+                            {
+                                corrected
+                            } else {
+                                decoded
+                            };
+                            result.extend_from_slice(&chunk_data);
+                        }
+                    }
+                    result.truncate(old_file.size);
+                    result
+                }
+            } else {
+                // Legacy mode: sequential decode
+                let mut result = Vec::new();
+                for (chunk_idx, &chunk_id) in old_file.chunks.iter().enumerate() {
+                    if let Some(chunk_vec) = self.engram.codebook.get(&chunk_id) {
+                        let this_chunk_size = if chunk_idx == num_chunks - 1 {
+                            old_file
+                                .size
+                                .saturating_sub(chunk_idx * old_chunk_size)
+                                .min(old_chunk_size)
+                        } else {
+                            old_chunk_size
+                        };
+                        let decoded =
+                            chunk_vec.decode_data(config, Some(&old_file.path), this_chunk_size);
+                        let chunk_data = if let Some(corrected) =
+                            self.engram.corrections.apply(chunk_id as u64, &decoded)
+                        {
+                            corrected
+                        } else {
+                            decoded
+                        };
+                        result.extend_from_slice(&chunk_data);
+                    }
+                }
+                result.truncate(old_file.size);
+                result
+            };
+
+            // Re-encode with new chunk IDs using parallel encoding for holographic mode
+            let base_chunk_id = new_manifest.total_chunks;
+
+            if let Some(ref mut encoder) = self.encoder {
+                // Parallel encode using batch_encode
+                let encoded_chunks = encoder.batch_encode(&file_data, chunk_size);
+                let num_new_chunks = encoded_chunks.len();
+                let chunk_data: Vec<&[u8]> = file_data.chunks(chunk_size).collect();
+
+                // Parallel decode for correction computation
+                let corrections_info: Vec<(usize, SparseVec, Vec<u8>)> = encoded_chunks
+                    .into_par_iter()
+                    .enumerate()
+                    .map(|(i, chunk_vec)| {
+                        let decoded = encoder.decode(&chunk_vec, chunk_data[i].len());
+                        (i, chunk_vec, decoded)
+                    })
+                    .collect();
+
+                // Sequential phase: add to new engram
+                let mut new_chunks = Vec::with_capacity(num_new_chunks);
+                for (i, chunk_vec, decoded) in corrections_info {
+                    let new_chunk_id = base_chunk_id + i;
+                    new_engram
+                        .corrections
+                        .add(new_chunk_id as u64, chunk_data[i], &decoded);
+                    new_engram.root = new_engram.root.bundle(&chunk_vec);
+                    new_engram.codebook.insert(new_chunk_id, chunk_vec);
+                    new_chunks.push(new_chunk_id);
+                }
+
+                if verbose {
+                    println!(
+                        "  Recompacted: {} ({} chunks)",
+                        old_file.path,
+                        new_chunks.len()
+                    );
+                }
+
+                new_manifest.files.push(FileEntry {
+                    path: old_file.path.clone(),
+                    is_text: old_file.is_text,
+                    size: old_file.size,
+                    chunks: new_chunks.clone(),
+                    deleted: false,
+                });
+
+                new_manifest.total_chunks += new_chunks.len();
+            } else {
+                // Legacy mode: sequential encode
+                let mut new_chunks = Vec::new();
+                for (i, chunk) in file_data.chunks(chunk_size).enumerate() {
+                    let new_chunk_id = base_chunk_id + i;
                     let encoded = SparseVec::encode_data(chunk, config, Some(&old_file.path));
                     let decoded = encoded.decode_data(config, Some(&old_file.path), chunk.len());
-                    (encoded, decoded)
-                };
 
-                new_engram
-                    .corrections
-                    .add(new_chunk_id as u64, chunk, &decoded);
+                    new_engram
+                        .corrections
+                        .add(new_chunk_id as u64, chunk, &decoded);
+                    new_engram.root = new_engram.root.bundle(&encoded);
+                    new_engram.codebook.insert(new_chunk_id, encoded);
+                    new_chunks.push(new_chunk_id);
+                }
 
-                new_engram.root = new_engram.root.bundle(&chunk_vec);
-                new_engram.codebook.insert(new_chunk_id, chunk_vec);
-                new_chunks.push(new_chunk_id);
+                if verbose {
+                    println!(
+                        "  Recompacted: {} ({} chunks)",
+                        old_file.path,
+                        new_chunks.len()
+                    );
+                }
+
+                new_manifest.files.push(FileEntry {
+                    path: old_file.path.clone(),
+                    is_text: old_file.is_text,
+                    size: old_file.size,
+                    chunks: new_chunks.clone(),
+                    deleted: false,
+                });
+
+                new_manifest.total_chunks += new_chunks.len();
             }
-
-            if verbose {
-                println!(
-                    "  Recompacted: {} ({} chunks)",
-                    old_file.path,
-                    new_chunks.len()
-                );
-            }
-
-            new_manifest.files.push(FileEntry {
-                path: old_file.path.clone(),
-                is_text: old_file.is_text,
-                size: old_file.size,
-                chunks: new_chunks.clone(),
-                deleted: false,
-            });
-
-            new_manifest.total_chunks += new_chunks.len();
         }
 
         // Replace old engram and manifest with compacted versions
@@ -1506,47 +1706,117 @@ impl EmbrFS {
                 fs::create_dir_all(parent)?;
             }
 
-            let mut reconstructed = Vec::new();
             let num_chunks = file_entry.chunks.len();
-            for (chunk_idx, &chunk_id) in file_entry.chunks.iter().enumerate() {
-                if let Some(chunk_vec) = engram.codebook.get(&chunk_id) {
-                    // Calculate the actual chunk size for this chunk
-                    // Last chunk may be smaller than the standard chunk_size
-                    let this_chunk_size = if chunk_idx == num_chunks - 1 {
-                        // Last chunk: remaining bytes
-                        let remaining = file_entry.size.saturating_sub(chunk_idx * chunk_size);
-                        remaining.min(chunk_size)
-                    } else {
-                        chunk_size
-                    };
 
-                    // Decode the sparse vector to bytes using appropriate method
-                    let decoded = if let Some(ref enc) = encoder {
-                        // Holographic mode: use ReversibleVSAEncoder
-                        enc.decode(chunk_vec, this_chunk_size)
-                    } else {
-                        // Legacy mode: use SparseVec::decode_data
-                        chunk_vec.decode_data(config, Some(&file_entry.path), this_chunk_size)
-                    };
+            // Holographic mode: use parallel batch decoding
+            let reconstructed = if let Some(ref enc) = encoder {
+                // Collect chunk vectors for batch decoding
+                let chunk_vecs: Vec<&SparseVec> = file_entry
+                    .chunks
+                    .iter()
+                    .filter_map(|&chunk_id| engram.codebook.get(&chunk_id))
+                    .collect();
 
-                    // Apply correction to guarantee bit-perfect reconstruction
-                    let chunk_data = if let Some(corrected) =
-                        engram.corrections.apply(chunk_id as u64, &decoded)
-                    {
-                        corrected
-                    } else {
-                        // No correction found - use decoded directly
-                        // This can happen with legacy engrams or if correction store is empty
-                        decoded
-                    };
+                if chunk_vecs.len() != num_chunks {
+                    // Some chunks missing, fall back to sequential with correction
+                    let mut result = Vec::new();
+                    for (chunk_idx, &chunk_id) in file_entry.chunks.iter().enumerate() {
+                        if let Some(chunk_vec) = engram.codebook.get(&chunk_id) {
+                            let this_chunk_size = if chunk_idx == num_chunks - 1 {
+                                let remaining =
+                                    file_entry.size.saturating_sub(chunk_idx * chunk_size);
+                                remaining.min(chunk_size)
+                            } else {
+                                chunk_size
+                            };
+                            let decoded = enc.decode(chunk_vec, this_chunk_size);
+                            let chunk_data = if let Some(corrected) =
+                                engram.corrections.apply(chunk_id as u64, &decoded)
+                            {
+                                corrected
+                            } else {
+                                decoded
+                            };
+                            result.extend_from_slice(&chunk_data);
+                        }
+                    }
+                    result
+                } else {
+                    // Parallel decode all chunks, then apply corrections
+                    // Clone vectors for batch_decode (it expects owned SparseVecs)
+                    let chunk_vecs_owned: Vec<SparseVec> =
+                        chunk_vecs.iter().map(|v| (*v).clone()).collect();
 
-                    reconstructed.extend_from_slice(&chunk_data);
+                    // Parallel decode using batch_decode
+                    let decoded_bytes =
+                        enc.batch_decode(&chunk_vecs_owned, chunk_size, file_entry.size);
+
+                    // Apply corrections in parallel
+                    let chunk_sizes: Vec<usize> = (0..num_chunks)
+                        .map(|i| {
+                            if i == num_chunks - 1 {
+                                file_entry
+                                    .size
+                                    .saturating_sub(i * chunk_size)
+                                    .min(chunk_size)
+                            } else {
+                                chunk_size
+                            }
+                        })
+                        .collect();
+
+                    let corrected_chunks: Vec<Vec<u8>> = file_entry
+                        .chunks
+                        .par_iter()
+                        .enumerate()
+                        .map(|(chunk_idx, &chunk_id)| {
+                            let start = chunk_idx * chunk_size;
+                            let end = (start + chunk_sizes[chunk_idx]).min(decoded_bytes.len());
+                            let decoded_chunk = decoded_bytes[start..end].to_vec();
+
+                            if let Some(corrected) =
+                                engram.corrections.apply(chunk_id as u64, &decoded_chunk)
+                            {
+                                corrected
+                            } else {
+                                decoded_chunk
+                            }
+                        })
+                        .collect();
+
+                    corrected_chunks.into_iter().flatten().collect()
                 }
-            }
+            } else {
+                // Legacy mode: sequential decoding
+                let mut result = Vec::new();
+                for (chunk_idx, &chunk_id) in file_entry.chunks.iter().enumerate() {
+                    if let Some(chunk_vec) = engram.codebook.get(&chunk_id) {
+                        let this_chunk_size = if chunk_idx == num_chunks - 1 {
+                            let remaining = file_entry.size.saturating_sub(chunk_idx * chunk_size);
+                            remaining.min(chunk_size)
+                        } else {
+                            chunk_size
+                        };
+                        let decoded =
+                            chunk_vec.decode_data(config, Some(&file_entry.path), this_chunk_size);
 
-            reconstructed.truncate(file_entry.size);
+                        let chunk_data = if let Some(corrected) =
+                            engram.corrections.apply(chunk_id as u64, &decoded)
+                        {
+                            corrected
+                        } else {
+                            decoded
+                        };
+                        result.extend_from_slice(&chunk_data);
+                    }
+                }
+                result
+            };
 
-            fs::write(&file_path, reconstructed)?;
+            let mut final_data = reconstructed;
+            final_data.truncate(file_entry.size);
+
+            fs::write(&file_path, final_data)?;
 
             if verbose {
                 println!("Extracted: {}", file_entry.path);
