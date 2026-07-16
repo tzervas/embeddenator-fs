@@ -106,7 +106,7 @@ impl fmt::Debug for VersionedChunk {
             .field("version", &self.version)
             .field("original_size", &self.original_size)
             .field("ref_count", &self.ref_count())
-            .field("content_hash", &format!("{:02x?}", &self.content_hash))
+            .field("content_hash", &format!("{:02x?}", self.content_hash))
             .field("age_ms", &self.age().as_millis())
             .finish()
     }

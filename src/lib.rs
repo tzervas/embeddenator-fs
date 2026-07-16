@@ -66,7 +66,7 @@ mod tests {
     #[test]
     fn component_loads() {
         // Verify core types are accessible
-        let fs = EmbrFS::new();
+        let fs = EmbrFS::new_holographic();
         assert!(fs.engram.codebook.is_empty());
     }
 }
