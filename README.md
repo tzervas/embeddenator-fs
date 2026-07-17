@@ -1,5 +1,10 @@
 # embeddenator-fs
 
+<!-- FLEET-BADGES:BEGIN -->
+[![CI](https://github.com/tzervas/embeddenator-fs/actions/workflows/fleet-ci.yml/badge.svg?branch=main)](https://github.com/tzervas/embeddenator-fs/actions/workflows/fleet-ci.yml?query=branch%3Amain)
+[![Security](https://github.com/tzervas/embeddenator-fs/actions/workflows/fleet-security.yml/badge.svg?branch=main)](https://github.com/tzervas/embeddenator-fs/actions/workflows/fleet-security.yml?query=branch%3Amain)
+<!-- FLEET-BADGES:END -->
+
 [![Crates.io](https://img.shields.io/crates/v/embeddenator-fs.svg)](https://crates.io/crates/embeddenator-fs)
 [![Documentation](https://docs.rs/embeddenator-fs/badge.svg)](https://docs.rs/embeddenator-fs)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
